@@ -702,7 +702,16 @@ export const appRouter = router({
         phone: z.string().regex(PHONE_REGEX, "Phone must be in international format, e.g. +233241234567"),
       }))
       .mutation(async ({ input }) => {
-        const { count, limit } = await db.countRecentOtps(input.phone);
+        let count: number, limit: number;
+        try {
+          ({ count, limit } = await db.withDbRetry(() => db.countRecentOtps(input.phone)));
+        } catch (err) {
+          console.error("[sendOtp] DB unreachable:", err);
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message: "Can't reach the server right now. Check your internet connection and try again.",
+          });
+        }
         if (count >= limit) {
           throw new TRPCError({
             code: "TOO_MANY_REQUESTS",
@@ -711,7 +720,7 @@ export const appRouter = router({
         }
 
         const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
-        await db.createOtp(input.phone, hashOtp(code), new Date(Date.now() + OTP_TTL_MS));
+        await db.withDbRetry(() => db.createOtp(input.phone, hashOtp(code), new Date(Date.now() + OTP_TTL_MS)));
         await sendSms(input.phone, `Your RideX verification code is ${code}. It expires in 5 minutes.`);
 
         return {
@@ -731,7 +740,7 @@ export const appRouter = router({
         name: z.string().trim().min(1).max(100).optional(), // used when signing up
       }))
       .mutation(async ({ input, ctx }) => {
-        const otp = await db.getActiveOtp(input.phone);
+        const otp = await db.withDbRetry(() => db.getActiveOtp(input.phone));
         if (!otp) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Code expired or not found. Request a new one." });
         }

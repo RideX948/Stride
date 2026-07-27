@@ -30,8 +30,18 @@ let _db: ReturnType<typeof drizzle> | null = null;
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
-      // prepare: false is required for Supabase's transaction pooler (pgbouncer)
-      const client = postgres(process.env.DATABASE_URL, { prepare: false });
+      // prepare: false is required for Supabase's transaction pooler (pgbouncer).
+      // Flaky networks (mobile hotspots) drop many Postgres handshakes, so:
+      //  - connect_timeout: give each attempt more time before giving up
+      //  - keep_alive: hold on to a connection once we win one
+      //  - fetch_types: false skips an extra startup roundtrip
+      const client = postgres(process.env.DATABASE_URL, {
+        prepare: false,
+        connect_timeout: 10,
+        keep_alive: 30,
+        idle_timeout: 0,
+        fetch_types: false,
+      });
       _db = drizzle(client);
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
@@ -39,6 +49,37 @@ export async function getDb() {
     }
   }
   return _db;
+}
+
+/**
+ * Retry a DB operation on connection-level failures. On unreliable networks
+ * (e.g. phone hotspots) most handshakes are silently dropped but some get
+ * through — a few retries turns "always fails" into "usually works".
+ */
+export async function withDbRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      // Drizzle wraps the driver error ("Failed query: ...") — the real code
+      // (CONNECT_TIMEOUT etc.) lives on err.cause, so check the whole chain.
+      const chain: unknown[] = [err];
+      let cur = err as { cause?: unknown };
+      while (cur?.cause) { chain.push(cur.cause); cur = cur.cause as { cause?: unknown }; }
+      const CONN_CODES = ["CONNECT_TIMEOUT", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "CONNECTION_CLOSED", "CONNECTION_ENDED", "ENOTFOUND"];
+      const isConnErr = chain.some((e) => {
+        const code = (e as { code?: string })?.code ?? "";
+        const msg = e instanceof Error ? e.message : String(e);
+        return CONN_CODES.some((c) => code === c || msg.includes(c));
+      });
+      if (!isConnErr || i === attempts - 1) throw err;
+      const label = (chain[chain.length - 1] as { code?: string })?.code ?? (err instanceof Error ? err.message : "unknown");
+      console.warn(`[Database] Connection attempt ${i + 1}/${attempts} failed (${label}), retrying...`);
+    }
+  }
+  throw lastErr;
 }
 
 // ─── Users ────────────────────────────────────────────────────────────────────
