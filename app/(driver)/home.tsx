@@ -16,6 +16,7 @@ import { trpc } from "@/lib/trpc";
 import { useRideX } from "@/lib/ridex-context";
 import { NotificationsBell } from "@/components/notifications-bell";
 import { useDriverLocation } from "@/hooks/use-driver-location";
+import { useRealtimeConnected, useRealtimeTopic } from "@/hooks/use-realtime";
 import { RideMap, type RideMapMarker } from "@/components/ride-map";
 
 const COLORS = {
@@ -48,6 +49,8 @@ export default function DriverHomeScreen() {
   const [showSosSuccess, setShowSosSuccess] = useState(false);
   const [showStandDownConfirm, setShowStandDownConfirm] = useState(false);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // When the push channel is live, fallback polls stretch out
+  const live = useRealtimeConnected();
 
   // Driver profile (creates one on first call). profile.id is the driverId
   // that rides.driverId references.
@@ -73,9 +76,13 @@ export default function DriverHomeScreen() {
   // Current active ride for this driver (accepted/arriving/in_progress)
   const activeRideQuery = trpc.rides.getActiveForDriver.useQuery(
     { driverId: driverId ?? 0 },
-    { enabled: !!driverId, refetchInterval: 4000 }
+    { enabled: !!driverId, refetchInterval: live ? 20000 : 4000 }
   );
   const activeRide = activeRideQuery.data;
+
+  // Realtime: new/taken requests while waiting, lifecycle updates mid-ride
+  useRealtimeTopic(isOnline && !!driverId && !activeRide ? "drivers:online" : null);
+  useRealtimeTopic(activeRide ? `ride:${activeRide.id}` : null);
 
   // Stream real GPS to the server while online (or mid-ride even if toggled off)
   useDriverLocation(driverId, isOnline || !!activeRide);
@@ -84,7 +91,7 @@ export default function DriverHomeScreen() {
   const [showDemand, setShowDemand] = useState(false);
   const demandQuery = trpc.rides.demand.useQuery(undefined, {
     enabled: showDemand,
-    refetchInterval: showDemand ? 10000 : false,
+    refetchInterval: showDemand ? (live ? 30000 : 10000) : false,
   });
   const demandPoints = demandQuery.data ?? [];
 
@@ -128,10 +135,12 @@ export default function DriverHomeScreen() {
     }
   }
 
-  // Poll for pending requests while online and free
+  // Pending requests: pushed instantly over WS (ride:new invalidates this
+  // query); the poll is the slow fallback. The 15s countdown + local
+  // dismissals below stay unchanged — they read from this query's data.
   const pendingQuery = trpc.rides.getPending.useQuery(
     {},
-    { enabled: isOnline && !!driverId && !activeRide, refetchInterval: 4000 }
+    { enabled: isOnline && !!driverId && !activeRide, refetchInterval: live ? 30000 : 4000 }
   );
   const incomingRide =
     isOnline && !activeRide
@@ -233,13 +242,13 @@ export default function DriverHomeScreen() {
   const resolveSos = trpc.sos.resolve.useMutation();
   const mySosQuery = trpc.sos.getActive.useQuery(undefined, {
     enabled: Number.isFinite(userId),
-    refetchInterval: 10000,
+    refetchInterval: live ? 60000 : 10000,
   });
   const mySos = mySosQuery.data;
   // Alerts raised by the passenger on my current ride
   const rideSosQuery = trpc.sos.getActiveForRide.useQuery(
     { rideId: activeRide?.id ?? 0 },
-    { enabled: !!activeRide, refetchInterval: 5000 }
+    { enabled: !!activeRide, refetchInterval: live ? 30000 : 5000 }
   );
   const passengerSos = (rideSosQuery.data ?? []).find(
     (a) => a.triggeredBy === "passenger"
@@ -500,6 +509,18 @@ export default function DriverHomeScreen() {
                 ? "..."
                 : nextStatusLabel[activeRide.status] ?? "Continue"}
             </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.messageBtn}
+            onPress={() =>
+              router.push({
+                pathname: "/(driver)/chat",
+                params: { rideId: String(activeRide.id) },
+              } as any)
+            }
+          >
+            <Text style={styles.messageBtnText}>💬 Message Passenger</Text>
           </TouchableOpacity>
         </View>
       ) : (
@@ -1125,6 +1146,21 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "800",
     color: "#000",
+  },
+  messageBtn: {
+    backgroundColor: COLORS.surface2,
+    borderRadius: 16,
+    height: 46,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  messageBtnText: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: COLORS.foreground,
   },
   // Request Modal
   requestOverlay: {

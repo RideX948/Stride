@@ -228,6 +228,16 @@ export default function PassengerHomeScreen() {
 
   const selectedRideInfo = RIDE_TYPES.find((r) => r.type === selectedRide)!;
 
+  // Safety net: if a ride is live (searching/accepted/arriving/in_progress),
+  // surface a banner that jumps back to the tracking screen — navigating away
+  // (e.g. via chat back button or tab switch) must never strand the ride.
+  const passengerId = Number(user?.id);
+  const activeRideQuery = trpc.rides.getActiveForPassenger.useQuery(
+    { passengerId },
+    { enabled: Number.isFinite(passengerId), refetchInterval: 10000 }
+  );
+  const activeRide = activeRideQuery.data;
+
   // Real online drivers near the passenger (count + map markers)
   const nearbyQuery = trpc.driver.nearby.useQuery(
     { lat: myPos?.lat ?? 0, lng: myPos?.lng ?? 0, radiusKm: 15 },
@@ -308,6 +318,30 @@ export default function PassengerHomeScreen() {
           style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(15, 26, 46, 0.95)" }}
         />
       </SafeAreaView>
+
+      {/* Ride-in-progress banner — tap to return to live tracking */}
+      {activeRide && (
+        <TouchableOpacity
+          style={styles.activeRideBanner}
+          onPress={() => router.push("/(passenger)/tracking" as any)}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.activeRideIcon}>🚗</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.activeRideTitle}>
+              {activeRide.status === "searching"
+                ? "Finding your driver..."
+                : activeRide.status === "in_progress"
+                ? "Trip in progress"
+                : "Driver on the way"}
+            </Text>
+            <Text style={styles.activeRideSub} numberOfLines={1}>
+              To {activeRide.destinationAddress} · tap to track
+            </Text>
+          </View>
+          <Text style={styles.activeRideChevron}>›</Text>
+        </TouchableOpacity>
+      )}
 
       {/* Map controls */}
       <View style={styles.mapControls}>
@@ -489,6 +523,23 @@ const styles = StyleSheet.create({
     gap: 10,
     zIndex: 10,
   },
+  activeRideBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginHorizontal: 16,
+    marginTop: 4,
+    padding: 12,
+    borderRadius: 14,
+    backgroundColor: "rgba(0,200,255,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(0,200,255,0.45)",
+    zIndex: 10,
+  },
+  activeRideIcon: { fontSize: 22 },
+  activeRideTitle: { fontSize: 14, fontWeight: "800", color: COLORS.primary },
+  activeRideSub: { fontSize: 11, color: COLORS.muted, marginTop: 1 },
+  activeRideChevron: { fontSize: 22, color: COLORS.primary, fontWeight: "700" },
   profileBtn: {
     width: 40,
     height: 40,

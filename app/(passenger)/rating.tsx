@@ -1,7 +1,9 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -9,6 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import * as WebBrowser from "expo-web-browser";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { trpc } from "@/lib/trpc";
 import { useRideX } from "@/lib/ridex-context";
@@ -67,6 +70,74 @@ export default function RatingScreen() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
 
+  // ── Fare payment (Aza) ──
+  // Cash-settled rides can be paid digitally right here. Mirrors the wallet
+  // top-up checkout flow: open Aza checkout, poll status, realtime refresh.
+  type PayPhase = "idle" | "waiting" | "done";
+  const [payPhase, setPayPhase] = useState<PayPhase>("idle");
+  const [payPaymentId, setPayPaymentId] = useState<number | null>(null);
+  const [isDevPay, setIsDevPay] = useState(false);
+
+  const ridePaymentQuery = trpc.payments.getRidePayment.useQuery(
+    { rideId },
+    { enabled: Number.isFinite(rideId) }
+  );
+  const payInfo = ridePaymentQuery.data;
+  const payRide = trpc.payments.payRide.useMutation();
+
+  const payStatusQuery = trpc.payments.getStatus.useQuery(
+    { paymentId: payPaymentId ?? 0 },
+    { enabled: payPhase === "waiting" && payPaymentId !== null, refetchInterval: 3000 }
+  );
+
+  useEffect(() => {
+    if (payPhase !== "waiting") return;
+    if (payStatusQuery.data?.status === "completed") {
+      setPayPhase("done");
+      ridePaymentQuery.refetch();
+    } else if (payStatusQuery.data?.status === "failed") {
+      setPayPhase("idle");
+      setPayPaymentId(null);
+      Alert.alert("Payment not completed", "The checkout expired or was cancelled. You can try again.");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payStatusQuery.data?.status, payPhase]);
+
+  const handlePayWithAza = async () => {
+    // Popup-blocker defense (web): open the tab synchronously in the handler
+    let checkoutTab: Window | null = null;
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      checkoutTab = window.open("about:blank", "_blank");
+    }
+    try {
+      const result = await payRide.mutateAsync({ rideId });
+      setPayPaymentId(result.paymentId);
+      setIsDevPay(result.devMode);
+      if (result.devMode || !result.checkoutUrl) {
+        checkoutTab?.close();
+      } else if (Platform.OS === "web") {
+        if (checkoutTab) {
+          checkoutTab.location.href = result.checkoutUrl;
+        } else if (typeof window !== "undefined") {
+          window.open(result.checkoutUrl, "_blank");
+        }
+      } else {
+        WebBrowser.openBrowserAsync(result.checkoutUrl).catch(() => {
+          Alert.alert("Open checkout", "Could not open the payment page.");
+        });
+      }
+      setPayPhase("waiting");
+    } catch (err) {
+      checkoutTab?.close();
+      Alert.alert(
+        "Payment failed",
+        err instanceof Error ? err.message : "Could not reach the server."
+      );
+    }
+  };
+
+  const cashDue = payInfo?.settledMethod === "cash" && !payInfo.azaPaid && payPhase !== "done";
+
   const handleSubmit = async () => {
     if (rating === 0) return; // must pick a star count first
     setIsSubmitting(true);
@@ -91,11 +162,18 @@ export default function RatingScreen() {
     } finally {
       setIsSubmitting(false);
       setSubmitted(true);
-      setTimeout(() => {
-        router.replace("/(passenger)/home" as any);
-      }, 2000);
     }
   };
+
+  // Auto-redirect home after rating — but never cut off an in-flight payment.
+  useEffect(() => {
+    if (!submitted || payPhase === "waiting") return;
+    const timer = setTimeout(() => {
+      router.replace("/(passenger)/home" as any);
+    }, 2000);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [submitted, payPhase]);
 
   if (submitted) {
     return (
@@ -109,6 +187,20 @@ export default function RatingScreen() {
               <Text key={i} style={{ fontSize: 32, color: i < rating ? "#f59e0b" : "#1e3050" }}>★</Text>
             ))}
           </View>
+          {payPhase === "waiting" && (
+            <View style={{ alignItems: "center", marginTop: 24, gap: 8 }}>
+              <ActivityIndicator color={COLORS.primary} />
+              <Text style={{ fontSize: 13, color: COLORS.muted, textAlign: "center" }}>
+                {isDevPay ? "DEV: completing your fare payment..." : "Waiting for your fare payment to complete..."}
+              </Text>
+              <TouchableOpacity
+                style={{ marginTop: 6, padding: 10 }}
+                onPress={() => router.replace("/(passenger)/home" as any)}
+              >
+                <Text style={{ fontSize: 13, color: COLORS.muted }}>I'll finish later</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
       </SafeAreaView>
     );
@@ -143,6 +235,53 @@ export default function RatingScreen() {
             </Text>
           </View>
         </View>
+
+        {/* Payment status / Pay fare */}
+        {payInfo?.settledMethod === "wallet" && (
+          <View style={[styles.payCard, styles.payCardPaid]}>
+            <Text style={styles.payCardIcon}>✓</Text>
+            <Text style={styles.payCardPaidText}>Paid from wallet</Text>
+          </View>
+        )}
+        {(payInfo?.azaPaid || payPhase === "done") && payInfo?.settledMethod === "cash" && (
+          <View style={[styles.payCard, styles.payCardPaid]}>
+            <Text style={styles.payCardIcon}>✓</Text>
+            <Text style={styles.payCardPaidText}>Paid via Aza</Text>
+          </View>
+        )}
+        {cashDue && payPhase === "idle" && (
+          <View style={[styles.payCard, styles.payCardDue]}>
+            <View style={styles.payCardRow}>
+              <Text style={styles.payCardIcon}>💵</Text>
+              <Text style={styles.payCardDueText}>
+                GH₵{payInfo ? parseFloat(payInfo.fare).toFixed(2) : "—"} due — pay your driver in cash
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.payAzaBtn, payRide.isPending && { opacity: 0.6 }]}
+              onPress={handlePayWithAza}
+              disabled={payRide.isPending}
+            >
+              {payRide.isPending ? (
+                <ActivityIndicator color="#000" size="small" />
+              ) : (
+                <Text style={styles.payAzaBtnText}>Pay with Aza instead</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        )}
+        {cashDue && payPhase === "waiting" && (
+          <View style={[styles.payCard, styles.payCardDue]}>
+            <View style={styles.payCardRow}>
+              <ActivityIndicator color={COLORS.primary} size="small" />
+              <Text style={styles.payCardDueText}>
+                {isDevPay
+                  ? "DEV: simulated payment — completing..."
+                  : "Complete the payment in the Aza checkout..."}
+              </Text>
+            </View>
+          </View>
+        )}
 
         {/* Driver Info */}
         <View style={styles.driverCard}>
@@ -293,6 +432,55 @@ const styles = StyleSheet.create({
   fareDetail: {
     fontSize: 13,
     color: COLORS.muted,
+  },
+  payCard: {
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+  },
+  payCardPaid: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "rgba(0, 232, 135, 0.08)",
+    borderColor: "rgba(0, 232, 135, 0.35)",
+  },
+  payCardDue: {
+    backgroundColor: "rgba(245, 158, 11, 0.08)",
+    borderColor: "rgba(245, 158, 11, 0.35)",
+    gap: 12,
+  },
+  payCardRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  payCardIcon: {
+    fontSize: 18,
+  },
+  payCardPaidText: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: COLORS.success,
+  },
+  payCardDueText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: "600",
+    color: COLORS.warning,
+  },
+  payAzaBtn: {
+    backgroundColor: COLORS.primary,
+    borderRadius: 12,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  payAzaBtnText: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: "#000",
   },
   driverCard: {
     flexDirection: "row",

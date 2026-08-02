@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import { trpc } from "@/lib/trpc";
 import { useRideX } from "@/lib/ridex-context";
+import { useRealtimeConnected } from "@/hooks/use-realtime";
 
 const COLORS = {
   bg: "#060c18",
@@ -63,10 +64,13 @@ export function NotificationsBell({
   const { user } = useRideX();
   const userId = Number(user?.id);
   const [open, setOpen] = useState(false);
+  // notification:new events invalidate this cache instantly; the poll is a
+  // slow fallback while the push channel is down
+  const live = useRealtimeConnected();
 
   const unreadQuery = trpc.notifications.getUnreadCount.useQuery(
     { userId },
-    { enabled: Number.isFinite(userId), refetchInterval: 15000 }
+    { enabled: Number.isFinite(userId), refetchInterval: live ? 60000 : 15000 }
   );
   const listQuery = trpc.notifications.getAll.useQuery(
     { userId, limit: 30 },

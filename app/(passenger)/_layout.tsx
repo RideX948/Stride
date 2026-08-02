@@ -99,6 +99,7 @@ export default function PassengerLayout() {
       <Tabs.Screen name="booking" options={{ href: null, tabBarStyle: { display: "none" } }} />
       <Tabs.Screen name="tracking" options={{ href: null, tabBarStyle: { display: "none" } }} />
       <Tabs.Screen name="rating" options={{ href: null, tabBarStyle: { display: "none" } }} />
+      <Tabs.Screen name="chat" options={{ href: null, tabBarStyle: { display: "none" } }} />
     </Tabs>
   );
 }

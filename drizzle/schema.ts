@@ -1,6 +1,7 @@
 import {
   boolean,
   decimal,
+  index,
   integer,
   pgEnum,
   pgTable,
@@ -102,6 +103,9 @@ export const driverProfiles = pgTable("driver_profiles", {
   walletBalance: decimal("walletBalance", { precision: 10, scale: 2 }).default("0.00"),
   totalEarnings: decimal("totalEarnings", { precision: 12, scale: 2 }).default("0.00"),
   onlineSince: timestamp("onlineSince"),
+  // Driver's Aza account (email or username) — payout destination for
+  // Aza Connect transfers. Null until the driver links it.
+  azaRecipient: varchar("azaRecipient", { length: 320 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
@@ -194,19 +198,27 @@ export const ratings = pgTable("ratings", {
 
 // ─── Payments ─────────────────────────────────────────────────────────────────
 
-export const payments = pgTable("payments", {
-  id: serial("id").primaryKey(),
-  rideId: integer("rideId").notNull(),
-  userId: integer("userId").notNull(),
-  amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
-  currency: varchar("currency", { length: 3 }).default("GHS").notNull(),
-  method: paymentMethodEnum("method").notNull(),
-  status: paymentStatusEnum("status").default("pending").notNull(),
-  reference: varchar("reference", { length: 100 }),
-  providerRef: varchar("providerRef", { length: 100 }),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+export const payments = pgTable(
+  "payments",
+  {
+    id: serial("id").primaryKey(),
+    // 0 = not tied to a ride (e.g. wallet top-up). Filter rideId > 0 when joining rides.
+    rideId: integer("rideId").notNull(),
+    userId: integer("userId").notNull(),
+    amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
+    currency: varchar("currency", { length: 3 }).default("GHS").notNull(),
+    method: paymentMethodEnum("method").notNull(),
+    status: paymentStatusEnum("status").default("pending").notNull(),
+    reference: varchar("reference", { length: 100 }),
+    providerRef: varchar("providerRef", { length: 100 }),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
+  },
+  (t) => [
+    // Webhook completion looks payments up by our reference
+    index("payments_reference_idx").on(t.reference),
+  ],
+);
 
 // ─── Wallet Transactions ──────────────────────────────────────────────────────
 
@@ -359,6 +371,17 @@ export const sosAlerts = pgTable("sos_alerts", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
+// ─── Ride Messages (driver ↔ passenger chat) ──────────────────────────────────
+
+export const messages = pgTable("messages", {
+  id: serial("id").primaryKey(),
+  rideId: integer("rideId").notNull(),
+  senderId: integer("senderId").notNull(), // users.id (both roles)
+  senderRole: userTypeEnum("senderRole").notNull(), // passenger | driver
+  body: text("body").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
 // ─── OTP Codes (phone login) ──────────────────────────────────────────────────
 
 export const otpCodes = pgTable("otp_codes", {
@@ -423,3 +446,6 @@ export type InsertSupportTicket = typeof supportTickets.$inferInsert;
 
 export type OtpCode = typeof otpCodes.$inferSelect;
 export type InsertOtpCode = typeof otpCodes.$inferInsert;
+
+export type Message = typeof messages.$inferSelect;
+export type InsertMessage = typeof messages.$inferInsert;

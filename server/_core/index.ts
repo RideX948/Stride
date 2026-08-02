@@ -7,6 +7,8 @@ import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
+import { initRealtime } from "../realtime/ws";
+import { registerAzaRoutes } from "../azaWebhook";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -52,6 +54,10 @@ async function startServer() {
     next();
   });
 
+  // Aza webhook needs the raw body for HMAC verification — its route-level
+  // express.raw parser must win before the global json middleware below.
+  registerAzaRoutes(app);
+
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
@@ -72,6 +78,9 @@ async function startServer() {
 
   const preferredPort = parseInt(process.env.PORT || "3000");
   const port = await findAvailablePort(preferredPort);
+
+  // Realtime push channel (WebSocket) at /api/ws
+  initRealtime(server);
 
   if (port !== preferredPort) {
     console.log(`Port ${preferredPort} is busy, using port ${port} instead`);

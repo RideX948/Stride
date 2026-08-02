@@ -8,6 +8,8 @@ import { systemRouter } from "./_core/systemRouter";
 import { sdk } from "./_core/sdk";
 import { sendSms, isDevSmsMode } from "./sms";
 import * as db from "./db";
+import * as aza from "./aza";
+import { realtimeBus } from "./realtime/bus";
 
 // ─── Phone OTP helpers ────────────────────────────────────────────────────────
 
@@ -52,7 +54,7 @@ const ridesRouter = router({
       destinationAddress: z.string(),
       destinationLat: z.number(),
       destinationLng: z.number(),
-      paymentMethod: z.enum(["card", "wallet", "mobile_money", "cash"]).default("mobile_money"),
+      paymentMethod: z.enum(["card", "wallet", "mobile_money", "cash"]).default("cash"),
       promoCode: z.string().optional(),
     }))
     .mutation(async ({ input }) => {
@@ -102,6 +104,11 @@ const ridesRouter = router({
         body: `Searching for a nearby ${input.rideType} driver...`,
         data: JSON.stringify({ rideId }),
       });
+      // Push the new request to online drivers instantly
+      realtimeBus.publish(
+        { kind: "topic", topic: "drivers:online" },
+        { type: "ride:new", rideId, rideType: input.rideType },
+      );
       return { rideId, ...fare, distanceKm, durationMin, discount };
     }),
 
@@ -153,6 +160,15 @@ const ridesRouter = router({
           data: JSON.stringify({ rideId: input.rideId, driverId: input.driverId }),
         });
       }
+      // Tell the passenger's tracking screen and dismiss other drivers' popups
+      realtimeBus.publish(
+        { kind: "topic", topic: `ride:${input.rideId}` },
+        { type: "ride:update", rideId: input.rideId, status: "accepted" },
+      );
+      realtimeBus.publish(
+        { kind: "topic", topic: "drivers:online" },
+        { type: "ride:taken", rideId: input.rideId },
+      );
       return { success: true };
     }),
 
@@ -199,12 +215,17 @@ const ridesRouter = router({
             durationMin: startedAt ? Math.max(1, Math.ceil((Date.now() - startedAt) / 60000)) : ride.durationMin,
           });
           await db.completeRide(input.rideId);
+          // Settle the passenger's side: wallet debit if covered, else cash
+          const settle = await db.debitPassengerForRide(input.rideId);
           if (ride.passengerId) {
             await db.createNotification({
               userId: ride.passengerId,
               type: "ride_completed",
               title: "Trip completed 🎉",
-              body: `Fare: GH₵${parseFloat(fare).toFixed(2)}. Don't forget to rate your driver!`,
+              body:
+                settle.method === "wallet"
+                  ? `GH₵${parseFloat(fare).toFixed(2)} paid from your wallet. Don't forget to rate your driver!`
+                  : `Fare: GH₵${parseFloat(fare).toFixed(2)} — pay your driver in cash. Don't forget to rate them!`,
               data: JSON.stringify({ rideId: input.rideId }),
             });
           }
@@ -243,6 +264,11 @@ const ridesRouter = router({
           });
         }
       }
+      // Push the lifecycle change to both parties on the ride
+      realtimeBus.publish(
+        { kind: "topic", topic: `ride:${input.rideId}` },
+        { type: "ride:update", rideId: input.rideId, status: input.status },
+      );
       return { success: true };
     }),
 
@@ -254,6 +280,8 @@ const ridesRouter = router({
       reason: z.string().optional(),
     }))
     .mutation(async ({ input }) => {
+      // Capture pre-cancel status so we can tell drivers a searching ride is gone
+      const before = await db.getRideById(input.rideId);
       await db.updateRideStatus(input.rideId, "cancelled", {
         cancelledBy: input.cancelledBy,
         cancelReason: input.reason,
@@ -281,6 +309,18 @@ const ridesRouter = router({
             data: JSON.stringify({ rideId: input.rideId }),
           });
         }
+      }
+      // Push cancellation to both parties; if it was still searching, also
+      // dismiss the request from other drivers' screens.
+      realtimeBus.publish(
+        { kind: "topic", topic: `ride:${input.rideId}` },
+        { type: "ride:update", rideId: input.rideId, status: "cancelled" },
+      );
+      if (before?.status === "searching") {
+        realtimeBus.publish(
+          { kind: "topic", topic: "drivers:online" },
+          { type: "ride:taken", rideId: input.rideId },
+        );
       }
       return { success: true };
     }),
@@ -375,6 +415,26 @@ const driverRouter = router({
       return { success: true };
     }),
 
+  // Link the driver's Aza account (payout destination for Connect transfers)
+  setAzaRecipient: publicProcedure
+    .input(z.object({
+      driverId: z.number(), // driverProfiles.id
+      azaRecipient: z.string().trim().max(320),
+    }))
+    .mutation(async ({ input }) => {
+      if (input.azaRecipient) {
+        // Best-effort validation when live; network failures don't block saving
+        const check = await aza.resolveRecipient(input.azaRecipient);
+        if (!check.valid) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "That Aza account was not found. Check the email or username." });
+        }
+      }
+      await db.updateDriverProfileById(input.driverId, {
+        azaRecipient: input.azaRecipient || null,
+      });
+      return { success: true };
+    }),
+
   // Toggle online/offline
   toggleOnline: publicProcedure
     .input(z.object({ driverId: z.number(), isOnline: z.boolean() }))
@@ -388,6 +448,11 @@ const driverRouter = router({
     .input(z.object({ driverId: z.number(), lat: z.number(), lng: z.number() }))
     .mutation(async ({ input }) => {
       await db.updateDriverLocation(input.driverId, input.lat, input.lng);
+      // Stream the fix to whoever is watching this driver (passenger tracking)
+      realtimeBus.publish(
+        { kind: "topic", topic: `driver:${input.driverId}` },
+        { type: "driver:location", driverId: input.driverId, lat: input.lat, lng: input.lng },
+      );
       return { success: true };
     }),
 
@@ -488,13 +553,6 @@ const passengerRouter = router({
       return db.getPassengerWallet(input.userId);
     }),
 
-  // Top up wallet
-  topUpWallet: publicProcedure
-    .input(z.object({ userId: z.number(), amount: z.number().positive() }))
-    .mutation(async ({ input }) => {
-      return db.topUpPassengerWallet(input.userId, input.amount);
-    }),
-
   // Get saved places
   getSavedPlaces: publicProcedure
     .input(z.object({ userId: z.number() }))
@@ -552,6 +610,14 @@ const passengerRouter = router({
     .input(z.object({ id: z.number(), userId: z.number() }))
     .mutation(async ({ input }) => {
       await db.deletePaymentMethod(input.id, input.userId);
+      return { success: true };
+    }),
+
+  // Make one payment method the default
+  setDefaultPaymentMethod: publicProcedure
+    .input(z.object({ id: z.number(), userId: z.number() }))
+    .mutation(async ({ input }) => {
+      await db.setDefaultPaymentMethod(input.id, input.userId);
       return { success: true };
     }),
 });
@@ -660,6 +726,17 @@ const sosRouter = router({
             });
           }
         }
+        // Surface the alert banner on the other party's active-ride screen
+        realtimeBus.publish(
+          { kind: "topic", topic: `ride:${input.rideId}` },
+          {
+            type: "sos:update",
+            rideId: input.rideId,
+            sosId: alertId,
+            triggeredBy: input.triggeredBy,
+            status: "active",
+          },
+        );
       }
 
       return { success: true, sosId: alertId };
@@ -684,8 +761,260 @@ const sosRouter = router({
       status: z.enum(["resolved", "false_alarm"]).default("resolved"),
     }))
     .mutation(async ({ input, ctx }) => {
+      // Grab the alert first so we know which ride to notify
+      const alert = await db.getActiveSosForUser(ctx.user.id);
       await db.resolveSosAlert(input.sosId, ctx.user.id, input.status);
+      if (alert?.id === input.sosId && alert.rideId) {
+        realtimeBus.publish(
+          { kind: "topic", topic: `ride:${alert.rideId}` },
+          {
+            type: "sos:update",
+            rideId: alert.rideId,
+            sosId: input.sosId,
+            triggeredBy: alert.triggeredBy,
+            status: input.status,
+          },
+        );
+      }
       return { success: true };
+    }),
+});
+
+// ─── Messages Router (driver ↔ passenger chat) ───────────────────────────────
+
+/**
+ * Resolve the caller's role on a ride, or null if they're not a party to it.
+ * rides.driverId stores driverProfiles.id — map via the profile to compare
+ * against the authenticated users.id.
+ */
+async function getRideRole(
+  ride: { passengerId: number; driverId: number | null },
+  userId: number,
+): Promise<"passenger" | "driver" | null> {
+  if (ride.passengerId === userId) return "passenger";
+  if (ride.driverId != null) {
+    const driver = await db.getDriverPublicById(ride.driverId);
+    if (driver?.userId === userId) return "driver";
+  }
+  return null;
+}
+
+const messagesRouter = router({
+  // Send a chat message on a live ride. Identity comes from the session, not
+  // client-supplied ids — chat must not be spoofable.
+  send: protectedProcedure
+    .input(z.object({
+      rideId: z.number(),
+      body: z.string().trim().min(1).max(1000),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const ride = await db.getRideById(input.rideId);
+      if (!ride) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Ride not found" });
+      }
+      const role = await getRideRole(ride, ctx.user.id);
+      if (!role) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "You are not part of this ride" });
+      }
+      if (["completed", "cancelled", "no_driver_found"].includes(ride.status)) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "This ride has ended" });
+      }
+      const message = await db.createMessage({
+        rideId: input.rideId,
+        senderId: ctx.user.id,
+        senderRole: role,
+        body: input.body,
+      });
+      // Deliver instantly to both parties' chat screens
+      realtimeBus.publish(
+        { kind: "topic", topic: `ride:${input.rideId}` },
+        {
+          type: "message:new",
+          rideId: input.rideId,
+          message: {
+            id: message.id,
+            rideId: message.rideId,
+            senderId: message.senderId,
+            senderRole: message.senderRole,
+            body: message.body,
+            createdAt: message.createdAt.toISOString(),
+          },
+        },
+      );
+      return message;
+    }),
+
+  // Chat history for a ride — only visible to its passenger and driver
+  list: protectedProcedure
+    .input(z.object({ rideId: z.number() }))
+    .query(async ({ input, ctx }) => {
+      const ride = await db.getRideById(input.rideId);
+      if (!ride) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Ride not found" });
+      }
+      const role = await getRideRole(ride, ctx.user.id);
+      if (!role) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "You are not part of this ride" });
+      }
+      return db.getMessagesForRide(input.rideId);
+    }),
+});
+
+// ─── Payments Router (Aza top-ups) ───────────────────────────────────────────
+
+const paymentsRouter = router({
+  /**
+   * Start a wallet top-up: create a pending payments row and an Aza hosted
+   * checkout session. The wallet is credited ONLY when the checkout.completed
+   * webhook (or the dev auto-complete timer) fires — never on this call.
+   */
+  createTopUp: protectedProcedure
+    .input(z.object({ amount: z.number().positive().max(10000) }))
+    .mutation(async ({ input, ctx }) => {
+      const userId = ctx.user.id; // session identity, never client-supplied
+      const reference = `topup_${userId}_${Date.now()}`;
+      const paymentId = await db.createPayment({
+        rideId: 0, // sentinel: not tied to a ride
+        userId,
+        amount: input.amount.toFixed(2),
+        method: "mobile_money",
+        status: "pending",
+        reference,
+      });
+      const session = await aza.createCheckoutSession({
+        amount: input.amount,
+        description: "RideX wallet top-up",
+        reference,
+        metadata: { kind: "topup", userId, paymentId },
+        idempotencyKey: reference,
+      });
+      await db.setPaymentProviderRef(paymentId, session.id);
+      if (aza.isDevAzaMode()) {
+        // Simulate the webhook through the exact production completion path
+        setTimeout(() => {
+          db.completeTopUpPayment(reference, session.id).catch((err) =>
+            console.warn("[aza:dev] auto-complete failed:", err),
+          );
+        }, 2000);
+      }
+      return {
+        checkoutUrl: session.checkoutUrl,
+        sessionId: session.id,
+        paymentId,
+        devMode: aza.isDevAzaMode(),
+      };
+    }),
+
+  // Poll a top-up's status while waiting for the checkout to complete.
+  // In live mode this also reconciles against Aza directly, so top-ups
+  // complete even when the webhook can't reach this server (e.g. local dev
+  // without a public URL).
+  getStatus: protectedProcedure
+    .input(z.object({ paymentId: z.number() }))
+    .query(async ({ input, ctx }) => {
+      const payment = await db.getPaymentById(input.paymentId);
+      if (!payment || payment.userId !== ctx.user.id) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Payment not found" });
+      }
+      if (payment.status === "pending" && payment.providerRef && !aza.isDevAzaMode()) {
+        try {
+          const session = await aza.getSession(payment.providerRef);
+          const isRidePay = payment.reference?.startsWith("ridepay_") ?? false;
+          if (session.status === "COMPLETED" && payment.reference) {
+            if (isRidePay) {
+              await db.completeRidePayment(payment.reference, payment.providerRef);
+            } else {
+              await db.completeTopUpPayment(payment.reference, payment.providerRef);
+            }
+            return { status: "completed" as const };
+          }
+          if ((session.status === "EXPIRED" || session.status === "CANCELLED") && payment.reference) {
+            await db.failTopUpPayment(payment.reference, session.status === "EXPIRED" ? "expired" : "cancelled");
+            return { status: "failed" as const };
+          }
+        } catch (err) {
+          console.warn("[aza] getStatus reconciliation failed:", (err as Error).message);
+        }
+      }
+      return { status: payment.status };
+    }),
+
+  /**
+   * Pay a cash-settled ride's fare via Aza checkout. The ride keeps its cash
+   * settlement marker (ride_<id>); this creates a separate "ridepay_" payment
+   * whose completion records the digital settlement.
+   */
+  payRide: protectedProcedure
+    .input(z.object({ rideId: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const ride = await db.getRideById(input.rideId);
+      if (!ride || ride.passengerId !== ctx.user.id) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Ride not found" });
+      }
+      if (ride.status !== "completed") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Ride is not completed yet" });
+      }
+      const info = await db.getRidePaymentInfo(input.rideId, ctx.user.id);
+      if (info.settledMethod !== "cash") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "This ride was already paid from your wallet" });
+      }
+      if (info.azaPaid) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "This ride has already been paid" });
+      }
+      // Re-use an in-flight checkout instead of creating a duplicate
+      if (info.pendingAzaPaymentId) {
+        const pending = await db.getPaymentById(info.pendingAzaPaymentId);
+        if (pending?.providerRef) {
+          const session = await aza.getSession(pending.providerRef).catch(() => null);
+          if (session && session.status === "PENDING") {
+            return {
+              checkoutUrl: session.checkoutUrl,
+              sessionId: pending.providerRef,
+              paymentId: pending.id,
+              devMode: aza.isDevAzaMode(),
+            };
+          }
+        }
+      }
+
+      const amount = parseFloat(info.fare);
+      const reference = `ridepay_${input.rideId}_${Date.now()}`;
+      const paymentId = await db.createPayment({
+        rideId: input.rideId,
+        userId: ctx.user.id,
+        amount: amount.toFixed(2),
+        method: "mobile_money",
+        status: "pending",
+        reference,
+      });
+      const session = await aza.createCheckoutSession({
+        amount,
+        description: `RideX ride #${input.rideId} fare`,
+        reference,
+        metadata: { kind: "ridepay", rideId: input.rideId, paymentId },
+        idempotencyKey: reference,
+      });
+      await db.setPaymentProviderRef(paymentId, session.id);
+      if (aza.isDevAzaMode()) {
+        setTimeout(() => {
+          db.completeRidePayment(reference, session.id).catch((err) =>
+            console.warn("[aza:dev] ride-pay auto-complete failed:", err),
+          );
+        }, 2000);
+      }
+      return {
+        checkoutUrl: session.checkoutUrl,
+        sessionId: session.id,
+        paymentId,
+        devMode: aza.isDevAzaMode(),
+      };
+    }),
+
+  // Payment picture for a completed ride (rating screen)
+  getRidePayment: protectedProcedure
+    .input(z.object({ rideId: z.number() }))
+    .query(async ({ input, ctx }) => {
+      return db.getRidePaymentInfo(input.rideId, ctx.user.id);
     }),
 });
 
@@ -826,6 +1155,8 @@ export const appRouter = router({
   notifications: notificationsRouter,
   support: supportRouter,
   sos: sosRouter,
+  messages: messagesRouter,
+  payments: paymentsRouter,
 });
 
 export type AppRouter = typeof appRouter;

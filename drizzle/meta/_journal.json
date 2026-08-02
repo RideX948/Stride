@@ -29,6 +29,20 @@
       "when": 1784487519212,
       "tag": "0003_dusty_lord_hawal",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785449155259,
+      "tag": "0004_narrow_luke_cage",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1785496500558,
+      "tag": "0005_serious_mysterio",
+      "breakpoints": true
     }
   ]
 }

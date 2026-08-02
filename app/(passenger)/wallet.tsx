@@ -1,8 +1,9 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Modal,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -10,6 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import * as WebBrowser from "expo-web-browser";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { trpc } from "@/lib/trpc";
 import { useRideX } from "@/lib/ridex-context";
@@ -50,12 +52,18 @@ function toTx(tx: {
   };
 }
 
+type TopUpPhase = "input" | "waiting" | "done";
+
 export default function WalletScreen() {
   const { user } = useRideX();
   const userId = Number(user?.id);
   const [showTopUp, setShowTopUp] = useState(false);
   const [topUpAmount, setTopUpAmount] = useState("");
   const [promoInput, setPromoInput] = useState("");
+  // Aza checkout flow: input → waiting (checkout open / dev simulation) → done
+  const [topUpPhase, setTopUpPhase] = useState<TopUpPhase>("input");
+  const [pendingPaymentId, setPendingPaymentId] = useState<number | null>(null);
+  const [isDevTopUp, setIsDevTopUp] = useState(false);
 
   const walletQuery = trpc.passenger.getWallet.useQuery(
     { userId },
@@ -65,7 +73,37 @@ export default function WalletScreen() {
     { userId },
     { enabled: Number.isFinite(userId) }
   );
-  const topUp = trpc.passenger.topUpWallet.useMutation();
+  const createTopUp = trpc.payments.createTopUp.useMutation();
+
+  // While waiting, poll the payment status (wallet:update realtime also
+  // refreshes the balance the moment the webhook lands)
+  const statusQuery = trpc.payments.getStatus.useQuery(
+    { paymentId: pendingPaymentId ?? 0 },
+    {
+      enabled: topUpPhase === "waiting" && pendingPaymentId !== null,
+      refetchInterval: 3000,
+    }
+  );
+
+  useEffect(() => {
+    if (topUpPhase !== "waiting") return;
+    if (statusQuery.data?.status === "completed") {
+      setTopUpPhase("done");
+      walletQuery.refetch();
+      const timer = setTimeout(() => {
+        setShowTopUp(false);
+        setTopUpPhase("input");
+        setTopUpAmount("");
+        setPendingPaymentId(null);
+      }, 1800);
+      return () => clearTimeout(timer);
+    }
+    if (statusQuery.data?.status === "failed") {
+      setTopUpPhase("input");
+      setPendingPaymentId(null);
+      Alert.alert("Payment not completed", "The checkout expired or was cancelled. Try again.");
+    }
+  }, [statusQuery.data?.status, topUpPhase]);
 
   const balance = parseFloat(walletQuery.data?.balance ?? "0");
   const transactions = (walletQuery.data?.transactions ?? []).map(toTx);
@@ -77,17 +115,135 @@ export default function WalletScreen() {
       Alert.alert("Invalid amount", "Enter an amount greater than zero.");
       return;
     }
+    // Popup-blocker defense (web): open the tab synchronously inside the
+    // press handler, then point it at the checkout URL once we have it.
+    let checkoutTab: Window | null = null;
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      checkoutTab = window.open("about:blank", "_blank");
+    }
     try {
-      await topUp.mutateAsync({ userId, amount });
-      setShowTopUp(false);
-      setTopUpAmount("");
-      walletQuery.refetch();
+      const result = await createTopUp.mutateAsync({ amount });
+      setPendingPaymentId(result.paymentId);
+      setIsDevTopUp(result.devMode);
+      if (result.devMode || !result.checkoutUrl) {
+        // Simulated payment — no browser needed, it completes server-side
+        checkoutTab?.close();
+      } else if (Platform.OS === "web") {
+        if (checkoutTab) {
+          checkoutTab.location.href = result.checkoutUrl;
+        } else if (typeof window !== "undefined") {
+          window.open(result.checkoutUrl, "_blank");
+        }
+      } else {
+        WebBrowser.openBrowserAsync(result.checkoutUrl).catch(() => {
+          Alert.alert("Open checkout", "Could not open the payment page.");
+        });
+      }
+      setTopUpPhase("waiting");
     } catch (err) {
+      checkoutTab?.close();
       Alert.alert(
         "Top-up failed",
         err instanceof Error ? err.message : "Could not reach the server."
       );
     }
+  };
+
+  const closeTopUpModal = () => {
+    // "I'll finish later" — a late webhook still credits the wallet
+    setShowTopUp(false);
+    setTopUpPhase("input");
+    setPendingPaymentId(null);
+  };
+
+  // ── Payment methods (saved for faster checkout) ──
+  const addMethod = trpc.passenger.addPaymentMethod.useMutation();
+  const deleteMethod = trpc.passenger.deletePaymentMethod.useMutation();
+  const setDefaultMethod = trpc.passenger.setDefaultPaymentMethod.useMutation();
+
+  const [showAddMethod, setShowAddMethod] = useState(false);
+  const [pmType, setPmType] = useState<"mobile_money" | "card">("mobile_money");
+  const [pmLabel, setPmLabel] = useState("");
+  const [pmNumber, setPmNumber] = useState("");
+  const [pmNetwork, setPmNetwork] = useState("");
+  const [pmDefault, setPmDefault] = useState(true);
+
+  const MOMO_NETWORKS = ["MTN", "Vodafone", "AirtelTigo"];
+  const CARD_NETWORKS = ["Visa", "Mastercard"];
+
+  const resetAddMethodForm = () => {
+    setPmType("mobile_money");
+    setPmLabel("");
+    setPmNumber("");
+    setPmNetwork("");
+    setPmDefault(true);
+  };
+
+  const handleSaveMethod = async () => {
+    const digits = pmNumber.replace(/\D/g, "");
+    if (!pmLabel.trim()) {
+      Alert.alert("Missing label", "Give this payment method a name, e.g. \"My MTN number\".");
+      return;
+    }
+    if (digits.length < 4) {
+      Alert.alert("Invalid number", "Enter the phone or card number (at least 4 digits).");
+      return;
+    }
+    try {
+      await addMethod.mutateAsync({
+        userId,
+        type: pmType,
+        label: pmLabel.trim(),
+        last4: digits.slice(-4), // never store the full number
+        network: pmNetwork || undefined,
+        isDefault: pmDefault,
+      });
+      setShowAddMethod(false);
+      resetAddMethodForm();
+      paymentMethodsQuery.refetch();
+    } catch (err) {
+      Alert.alert("Couldn't save", err instanceof Error ? err.message : "Could not reach the server.");
+    }
+  };
+
+  const handleMethodPress = (pm: { id: number; label: string; isDefault: boolean }) => {
+    const actions: { text: string; style?: "cancel" | "destructive"; onPress?: () => void }[] = [];
+    if (!pm.isDefault) {
+      actions.push({
+        text: "Set as default",
+        onPress: async () => {
+          try {
+            await setDefaultMethod.mutateAsync({ id: pm.id, userId });
+            paymentMethodsQuery.refetch();
+          } catch {
+            Alert.alert("Failed", "Could not update. Try again.");
+          }
+        },
+      });
+    }
+    actions.push({
+      text: "Remove",
+      style: "destructive",
+      onPress: () => {
+        Alert.alert("Remove payment method?", `"${pm.label}" will be removed.`, [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Remove",
+            style: "destructive",
+            onPress: async () => {
+              try {
+                await deleteMethod.mutateAsync({ id: pm.id, userId });
+                paymentMethodsQuery.refetch();
+              } catch {
+                Alert.alert("Failed", "Could not remove. Try again.");
+              }
+            },
+          },
+        ]);
+      },
+    });
+    actions.push({ text: "Cancel", style: "cancel" });
+    Alert.alert(pm.label, undefined, actions);
   };
 
   const QUICK_AMOUNTS = [10, 20, 50, 100];
@@ -125,7 +281,7 @@ export default function WalletScreen() {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Payment Methods</Text>
-            <TouchableOpacity>
+            <TouchableOpacity onPress={() => setShowAddMethod(true)}>
               <Text style={styles.sectionAction}>+ Add New</Text>
             </TouchableOpacity>
           </View>
@@ -136,12 +292,16 @@ export default function WalletScreen() {
               </View>
               <View style={styles.paymentInfo}>
                 <Text style={styles.paymentLabel}>No payment methods yet</Text>
-                <Text style={styles.paymentSub}>Rides are paid from your wallet balance</Text>
+                <Text style={styles.paymentSub}>Saved for faster checkout — rides are paid from your wallet</Text>
               </View>
             </View>
           ) : (
             paymentMethods.map((pm) => (
-              <TouchableOpacity key={pm.id} style={styles.paymentCard}>
+              <TouchableOpacity
+                key={pm.id}
+                style={styles.paymentCard}
+                onPress={() => handleMethodPress(pm)}
+              >
                 <View style={styles.paymentIconWrap}>
                   <Text style={styles.paymentIcon}>{pm.type === "card" ? "💳" : pm.type === "mobile_money" ? "📱" : "👛"}</Text>
                 </View>
@@ -222,47 +382,198 @@ export default function WalletScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.topUpModal}>
             <View style={styles.topUpHeader}>
-              <Text style={styles.topUpTitle}>Add Money</Text>
-              <TouchableOpacity onPress={() => setShowTopUp(false)}>
+              <Text style={styles.topUpTitle}>
+                {topUpPhase === "input" ? "Add Money" : topUpPhase === "waiting" ? "Completing Payment" : "Success"}
+              </Text>
+              <TouchableOpacity onPress={closeTopUpModal}>
                 <Text style={styles.closeBtn}>✕</Text>
               </TouchableOpacity>
             </View>
-            <Text style={styles.topUpLabel}>Enter Amount</Text>
-            <View style={styles.topUpInputRow}>
-              <Text style={styles.topUpCurrency}>GH₵</Text>
+
+            {topUpPhase === "input" && (
+              <>
+                <Text style={styles.topUpLabel}>Enter Amount</Text>
+                <View style={styles.topUpInputRow}>
+                  <Text style={styles.topUpCurrency}>GH₵</Text>
+                  <TextInput
+                    style={styles.topUpInput}
+                    placeholder="0.00"
+                    placeholderTextColor={COLORS.muted}
+                    value={topUpAmount}
+                    onChangeText={setTopUpAmount}
+                    keyboardType="decimal-pad"
+                  />
+                </View>
+                <View style={styles.quickAmounts}>
+                  {QUICK_AMOUNTS.map((amt) => (
+                    <TouchableOpacity
+                      key={amt}
+                      style={[styles.quickAmt, topUpAmount === String(amt) && styles.quickAmtActive]}
+                      onPress={() => setTopUpAmount(String(amt))}
+                    >
+                      <Text style={[styles.quickAmtText, topUpAmount === String(amt) && styles.quickAmtTextActive]}>
+                        GH₵{amt}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                <Text style={styles.topUpPayLabel}>
+                  You'll be taken to Aza's secure checkout to pay.
+                </Text>
+                <TouchableOpacity
+                  style={[styles.topUpConfirmBtn, createTopUp.isPending && { opacity: 0.7 }]}
+                  onPress={handleTopUp}
+                  disabled={createTopUp.isPending}
+                >
+                  {createTopUp.isPending ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.topUpConfirmText}>
+                      Pay {topUpAmount ? `GH₵${topUpAmount}` : ""} with Aza
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </>
+            )}
+
+            {topUpPhase === "waiting" && (
+              <View style={styles.waitingWrap}>
+                <ActivityIndicator size="large" color={COLORS.primary} />
+                <Text style={styles.waitingTitle}>
+                  {isDevTopUp ? "Simulating payment..." : "Waiting for your payment"}
+                </Text>
+                <Text style={styles.waitingSub}>
+                  {isDevTopUp
+                    ? "DEV: simulated payment — completing automatically"
+                    : "Complete the payment in the Aza checkout. Your balance updates automatically."}
+                </Text>
+                <TouchableOpacity style={styles.waitingLaterBtn} onPress={closeTopUpModal}>
+                  <Text style={styles.waitingLaterText}>I'll finish later</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {topUpPhase === "done" && (
+              <View style={styles.waitingWrap}>
+                <Text style={styles.doneIcon}>✅</Text>
+                <Text style={styles.waitingTitle}>
+                  GH₵{parseFloat(topUpAmount || "0").toFixed(2)} added!
+                </Text>
+                <Text style={styles.waitingSub}>Your wallet has been topped up.</Text>
+              </View>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Add Payment Method Modal */}
+      <Modal visible={showAddMethod} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.topUpModal}>
+            <View style={styles.topUpHeader}>
+              <Text style={styles.topUpTitle}>Add Payment Method</Text>
+              <TouchableOpacity
+                onPress={() => {
+                  setShowAddMethod(false);
+                  resetAddMethodForm();
+                }}
+              >
+                <Text style={styles.closeBtn}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Type picker */}
+            <Text style={styles.topUpLabel}>Type</Text>
+            <View style={styles.quickAmounts}>
+              <TouchableOpacity
+                style={[styles.quickAmt, pmType === "mobile_money" && styles.quickAmtActive]}
+                onPress={() => {
+                  setPmType("mobile_money");
+                  setPmNetwork("");
+                }}
+              >
+                <Text style={[styles.quickAmtText, pmType === "mobile_money" && styles.quickAmtTextActive]}>
+                  📱 Mobile Money
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.quickAmt, pmType === "card" && styles.quickAmtActive]}
+                onPress={() => {
+                  setPmType("card");
+                  setPmNetwork("");
+                }}
+              >
+                <Text style={[styles.quickAmtText, pmType === "card" && styles.quickAmtTextActive]}>
+                  💳 Card
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Label */}
+            <Text style={styles.topUpLabel}>Label</Text>
+            <View style={[styles.topUpInputRow, { height: 48 }]}>
               <TextInput
-                style={styles.topUpInput}
-                placeholder="0.00"
+                style={[styles.topUpInput, { fontSize: 15 }]}
+                placeholder={pmType === "mobile_money" ? "e.g. My MTN number" : "e.g. My Visa card"}
                 placeholderTextColor={COLORS.muted}
-                value={topUpAmount}
-                onChangeText={setTopUpAmount}
-                keyboardType="decimal-pad"
+                value={pmLabel}
+                onChangeText={setPmLabel}
               />
             </View>
+
+            {/* Number */}
+            <Text style={styles.topUpLabel}>
+              {pmType === "mobile_money" ? "Phone number" : "Card number"}
+            </Text>
+            <View style={[styles.topUpInputRow, { height: 48 }]}>
+              <TextInput
+                style={[styles.topUpInput, { fontSize: 15 }]}
+                placeholder={pmType === "mobile_money" ? "024 123 4567" : "•••• •••• •••• 1234"}
+                placeholderTextColor={COLORS.muted}
+                value={pmNumber}
+                onChangeText={setPmNumber}
+                keyboardType="number-pad"
+              />
+            </View>
+            <Text style={styles.pmPrivacyNote}>
+              Only the last 4 digits are stored — payments happen in Aza's secure checkout.
+            </Text>
+
+            {/* Network chips */}
+            <Text style={styles.topUpLabel}>Network</Text>
             <View style={styles.quickAmounts}>
-              {QUICK_AMOUNTS.map((amt) => (
+              {(pmType === "mobile_money" ? MOMO_NETWORKS : CARD_NETWORKS).map((n) => (
                 <TouchableOpacity
-                  key={amt}
-                  style={[styles.quickAmt, topUpAmount === String(amt) && styles.quickAmtActive]}
-                  onPress={() => setTopUpAmount(String(amt))}
+                  key={n}
+                  style={[styles.quickAmt, pmNetwork === n && styles.quickAmtActive]}
+                  onPress={() => setPmNetwork(pmNetwork === n ? "" : n)}
                 >
-                  <Text style={[styles.quickAmtText, topUpAmount === String(amt) && styles.quickAmtTextActive]}>
-                    GH₵{amt}
+                  <Text style={[styles.quickAmtText, pmNetwork === n && styles.quickAmtTextActive]}>
+                    {n}
                   </Text>
                 </TouchableOpacity>
               ))}
             </View>
+
+            {/* Default toggle */}
             <TouchableOpacity
-              style={[styles.topUpConfirmBtn, topUp.isPending && { opacity: 0.7 }]}
-              onPress={handleTopUp}
-              disabled={topUp.isPending}
+              style={[styles.topUpPayMethod, pmDefault && styles.topUpPayMethodActive]}
+              onPress={() => setPmDefault(!pmDefault)}
             >
-              {topUp.isPending ? (
+              <Text style={styles.topUpPayIcon}>⭐</Text>
+              <Text style={styles.topUpPayText}>Set as default</Text>
+              {pmDefault && <Text style={styles.topUpPayCheck}>✓</Text>}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.topUpConfirmBtn, addMethod.isPending && { opacity: 0.7 }]}
+              onPress={handleSaveMethod}
+              disabled={addMethod.isPending}
+            >
+              {addMethod.isPending ? (
                 <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.topUpConfirmText}>
-                  Add {topUpAmount ? `GH₵${topUpAmount}` : "Money"}
-                </Text>
+                <Text style={styles.topUpConfirmText}>Save Payment Method</Text>
               )}
             </TouchableOpacity>
           </View>
@@ -628,5 +939,45 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: "700",
     color: "#fff",
+  },
+  waitingWrap: {
+    alignItems: "center",
+    paddingVertical: 24,
+    gap: 12,
+  },
+  waitingTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: COLORS.foreground,
+  },
+  waitingSub: {
+    fontSize: 13,
+    color: COLORS.muted,
+    textAlign: "center",
+    lineHeight: 19,
+    paddingHorizontal: 12,
+  },
+  waitingLaterBtn: {
+    marginTop: 8,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: COLORS.surface2,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  waitingLaterText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: COLORS.muted,
+  },
+  doneIcon: {
+    fontSize: 44,
+  },
+  pmPrivacyNote: {
+    fontSize: 11,
+    color: COLORS.muted,
+    marginTop: -8,
+    marginBottom: 14,
   },
 });

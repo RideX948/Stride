@@ -5,6 +5,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
@@ -25,6 +26,7 @@ const COLORS = {
   muted: "#8899aa",
   border: "#1e3050",
   warning: "#f59e0b",
+  error: "#ff4444",
 };
 
 function EarningsChart({ data }: { data: { day: string; amount: number }[] }) {
@@ -199,6 +201,26 @@ export default function EarningsScreen() {
     { enabled: !!driverId }
   );
   const requestPayout = trpc.driver.requestPayout.useMutation();
+  const setAzaRecipient = trpc.driver.setAzaRecipient.useMutation();
+
+  // Payout account (Aza) linking
+  const [editingAza, setEditingAza] = useState(false);
+  const [azaInput, setAzaInput] = useState("");
+  const azaRecipient = profile?.azaRecipient ?? "";
+
+  const handleSaveAza = async () => {
+    if (!driverId) return;
+    try {
+      await setAzaRecipient.mutateAsync({ driverId, azaRecipient: azaInput.trim() });
+      setEditingAza(false);
+      refetchProfile();
+    } catch (err) {
+      Alert.alert(
+        "Couldn't save",
+        err instanceof Error ? err.message : "Could not reach the server."
+      );
+    }
+  };
 
   const totalEarnings = earningsData?.total ?? "0.00";
   const tripsCount = earningsData?.tripsCount ?? 0;
@@ -228,9 +250,17 @@ export default function EarningsScreen() {
       Alert.alert("Nothing to withdraw", "Complete trips to earn money first.");
       return;
     }
+    if (!azaRecipient) {
+      Alert.alert(
+        "Link your Aza account",
+        "Add your Aza email or username in the Payout Account section to receive payouts."
+      );
+      setEditingAza(true);
+      return;
+    }
     Alert.alert(
       "Cash Out",
-      `Withdraw GH₵${walletBalance.toFixed(2)} to Mobile Money?`,
+      `Send GH₵${walletBalance.toFixed(2)} to your Aza account (${azaRecipient})?`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -244,8 +274,10 @@ export default function EarningsScreen() {
               });
               walletQuery.refetch();
               payoutsQuery.refetch();
-              Alert.alert("Payout requested", "Your payout is being processed.");
+              Alert.alert("Payout sent 💸", "The money is on its way to your Aza account.");
             } catch (err) {
+              walletQuery.refetch();
+              payoutsQuery.refetch();
               Alert.alert(
                 "Payout failed",
                 err instanceof Error ? err.message : "Could not reach the server."
@@ -315,6 +347,51 @@ export default function EarningsScreen() {
               {requestPayout.isPending ? "Processing..." : `💵 Cash Out GH₵${walletBalance.toFixed(2)}`}
             </Text>
           </TouchableOpacity>
+        </View>
+
+        {/* Payout Account (Aza) */}
+        <View style={styles.azaCard}>
+          <View style={styles.azaHeader}>
+            <Text style={styles.azaTitle}>Payout Account</Text>
+            {!editingAza && (
+              <TouchableOpacity
+                onPress={() => {
+                  setAzaInput(azaRecipient);
+                  setEditingAza(true);
+                }}
+              >
+                <Text style={styles.azaEditBtn}>{azaRecipient ? "Edit" : "+ Link"}</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          {editingAza ? (
+            <View style={styles.azaEditRow}>
+              <TextInput
+                style={styles.azaInput}
+                placeholder="Aza email or username"
+                placeholderTextColor={COLORS.muted}
+                value={azaInput}
+                onChangeText={setAzaInput}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <TouchableOpacity
+                style={[styles.azaSaveBtn, setAzaRecipient.isPending && { opacity: 0.6 }]}
+                onPress={handleSaveAza}
+                disabled={setAzaRecipient.isPending}
+              >
+                <Text style={styles.azaSaveText}>
+                  {setAzaRecipient.isPending ? "..." : "Save"}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <Text style={azaRecipient ? styles.azaValue : styles.azaEmpty}>
+              {azaRecipient
+                ? `💳 ${azaRecipient}`
+                : "Not linked — payouts go to your Aza wallet"}
+            </Text>
+          )}
         </View>
 
         {/* Weekly Chart */}
@@ -394,9 +471,13 @@ export default function EarningsScreen() {
                 </View>
                 <View style={styles.payoutRight}>
                   <Text style={styles.payoutAmount}>GH₵{parseFloat(payout.amount).toFixed(2)}</Text>
-                  <View style={styles.payoutBadge}>
-                    <Text style={styles.payoutBadgeText}>
-                      {payout.status === "pending" ? "⏳ Pending" : "✓ Paid"}
+                  <View style={[styles.payoutBadge, payout.status === "failed" && styles.payoutBadgeFailed]}>
+                    <Text style={[styles.payoutBadgeText, payout.status === "failed" && styles.payoutBadgeTextFailed]}>
+                      {payout.status === "pending"
+                        ? "⏳ Pending"
+                        : payout.status === "failed"
+                        ? "✗ Failed"
+                        : "✓ Paid"}
                     </Text>
                   </View>
                 </View>
@@ -745,5 +826,74 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: "700",
     color: COLORS.primary,
+  },
+  payoutBadgeFailed: {
+    backgroundColor: "rgba(255, 68, 68, 0.1)",
+  },
+  payoutBadgeTextFailed: {
+    color: COLORS.error,
+  },
+  // Payout Account (Aza) card
+  azaCard: {
+    marginHorizontal: 20,
+    marginBottom: 20,
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  azaHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  azaTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: COLORS.foreground,
+  },
+  azaEditBtn: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: COLORS.primary,
+  },
+  azaValue: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: COLORS.foreground,
+  },
+  azaEmpty: {
+    fontSize: 13,
+    color: COLORS.muted,
+  },
+  azaEditRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  azaInput: {
+    flex: 1,
+    backgroundColor: COLORS.surface2,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    height: 44,
+    fontSize: 14,
+    color: COLORS.foreground,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  azaSaveBtn: {
+    backgroundColor: COLORS.primary,
+    borderRadius: 12,
+    paddingHorizontal: 18,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  azaSaveText: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: "#000",
   },
 });

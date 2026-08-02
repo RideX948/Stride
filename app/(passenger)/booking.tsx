@@ -93,9 +93,16 @@ export default function BookingScreen() {
   }>();
 
   const [selectedType, setSelectedType] = useState<RideType>("comfort");
-  const [paymentMethod] = useState("Mobile Money");
+  // Real payment choice: wallet (debited at trip end if balance covers) or cash
+  const [payMethod, setPayMethod] = useState<"wallet" | "cash">("wallet");
   const [promoCode] = useState("RIDEX10");
   const [isBooking, setIsBooking] = useState(false);
+
+  const walletQuery = trpc.passenger.getWallet.useQuery(
+    { userId: Number(user?.id) },
+    { enabled: Number.isFinite(Number(user?.id)) }
+  );
+  const walletBalance = parseFloat(walletQuery.data?.balance ?? "0");
 
   const selectedOption = RIDE_OPTIONS.find((r) => r.type === selectedType)!;
 
@@ -241,6 +248,7 @@ export default function BookingScreen() {
         destinationAddress: destination,
         destinationLat: destLat,
         destinationLng: destLng,
+        paymentMethod: payMethod,
         promoCode: promoCode || undefined,
       });
 
@@ -402,11 +410,32 @@ export default function BookingScreen() {
           <Text style={styles.paymentIcon}>💳</Text>
           <View style={styles.paymentInfo}>
             <Text style={styles.paymentLabel}>PAYMENT METHOD</Text>
-            <Text style={styles.paymentValue}>{paymentMethod}</Text>
+            <View style={styles.payPills}>
+              <TouchableOpacity
+                style={[styles.payPill, payMethod === "wallet" && styles.payPillActive]}
+                onPress={() => setPayMethod("wallet")}
+              >
+                <Text style={[styles.payPillText, payMethod === "wallet" && styles.payPillTextActive]}>
+                  👛 Wallet · GH₵{walletBalance.toFixed(2)}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.payPill, payMethod === "cash" && styles.payPillActive]}
+                onPress={() => setPayMethod("cash")}
+              >
+                <Text style={[styles.payPillText, payMethod === "cash" && styles.payPillTextActive]}>
+                  💵 Cash
+                </Text>
+              </TouchableOpacity>
+            </View>
+            {payMethod === "wallet" &&
+              fareFor(selectedType) != null &&
+              walletBalance < fareFor(selectedType)! && (
+                <Text style={styles.payWarn}>
+                  Low balance — this ride will charge as cash instead.
+                </Text>
+              )}
           </View>
-          <TouchableOpacity style={styles.changeBtn}>
-            <Text style={styles.changeBtnText}>Change</Text>
-          </TouchableOpacity>
         </View>
 
         <View style={{ height: 120 }} />
@@ -646,6 +675,22 @@ const styles = StyleSheet.create({
   paymentInfo: { flex: 1 },
   paymentLabel: { fontSize: 10, fontWeight: "700", color: COLORS.muted, letterSpacing: 0.5, marginBottom: 2 },
   paymentValue: { fontSize: 14, fontWeight: "600", color: COLORS.foreground },
+  payPills: { flexDirection: "row", gap: 8, marginTop: 4 },
+  payPill: {
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: COLORS.surface2,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  payPillActive: {
+    backgroundColor: "rgba(0,200,255,0.1)",
+    borderColor: COLORS.primary,
+  },
+  payPillText: { fontSize: 12, fontWeight: "700", color: COLORS.muted },
+  payPillTextActive: { color: COLORS.primary },
+  payWarn: { fontSize: 11, color: COLORS.warning, marginTop: 6 },
   changeBtn: {
     backgroundColor: "rgba(0,200,255,0.1)",
     borderRadius: 8,

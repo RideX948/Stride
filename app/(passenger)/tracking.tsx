@@ -15,6 +15,7 @@ import { rideStore } from "@/lib/ride-store";
 import { trpc } from "@/lib/trpc";
 import { useRideX } from "@/lib/ridex-context";
 import { distanceKm, etaMinutes } from "@/hooks/use-driver-location";
+import { useRealtimeConnected, useRealtimeTopic } from "@/hooks/use-realtime";
 import { RideMap, type RideMapMarker } from "@/components/ride-map";
 
 const { width, height } = Dimensions.get("window");
@@ -62,6 +63,8 @@ export default function TrackingScreen() {
   const [showSosConfirm, setShowSosConfirm] = useState(false);
   const [showSosSuccess, setShowSosSuccess] = useState(false);
   const [showStandDownConfirm, setShowStandDownConfirm] = useState(false);
+  // When the push channel is live, fallback polls stretch out
+  const live = useRealtimeConnected();
 
   // Ride id comes from the booking flow (saved in rideStore); the active-ride
   // query below recovers it after an app reload.
@@ -74,7 +77,7 @@ export default function TrackingScreen() {
 
   const activeRideQuery = trpc.rides.getActiveForPassenger.useQuery(
     { passengerId },
-    { enabled: Number.isFinite(passengerId) && rideId === null, refetchInterval: 4000 }
+    { enabled: Number.isFinite(passengerId) && rideId === null, refetchInterval: live ? 20000 : 4000 }
   );
   useEffect(() => {
     if (rideId === null && activeRideQuery.data?.id) {
@@ -84,14 +87,19 @@ export default function TrackingScreen() {
 
   const rideQuery = trpc.rides.getById.useQuery(
     { rideId: rideId ?? 0 },
-    { enabled: rideId !== null, refetchInterval: 3000 }
+    { enabled: rideId !== null, refetchInterval: live ? 15000 : 3000 }
   );
   const ride = rideQuery.data;
 
+  // Realtime: ride status pushed over WS; the polls above become slow fallbacks
+  useRealtimeTopic(rideId !== null ? `ride:${rideId}` : null);
+  useRealtimeTopic(ride?.driverId ? `driver:${ride.driverId}` : null);
+
   const driverQuery = trpc.driver.getPublic.useQuery(
     { driverId: ride?.driverId ?? 0 },
-    // Poll while the ride is live so the driver's GPS position streams in
-    { enabled: !!ride?.driverId, refetchInterval: 5000 }
+    // GPS arrives via the driver:<id> topic when the socket is live;
+    // poll while it's down so the position still streams in
+    { enabled: !!ride?.driverId, refetchInterval: live ? 30000 : 5000 }
   );
 
   const cancelRide = trpc.rides.cancel.useMutation();
@@ -101,7 +109,7 @@ export default function TrackingScreen() {
   const resolveSos = trpc.sos.resolve.useMutation();
   const activeSosQuery = trpc.sos.getActive.useQuery(undefined, {
     enabled: Number.isFinite(passengerId),
-    refetchInterval: 10000,
+    refetchInterval: live ? 60000 : 10000,
   });
   const activeSos = activeSosQuery.data;
 
@@ -432,11 +440,32 @@ export default function TrackingScreen() {
         {/* Action Buttons */}
         {tripStatus !== "completed" && tripStatus !== "cancelled" && (
           <View style={styles.actionRow}>
-            <TouchableOpacity style={styles.actionBtn}>
+            <TouchableOpacity
+              style={styles.actionBtn}
+              disabled={!d?.phone}
+              onPress={() => {
+                if (d?.phone) {
+                  Linking.openURL(`tel:${d.phone}`).catch(() => {
+                    Alert.alert("Call driver", `Dial ${d.phone} to reach your driver.`);
+                  });
+                }
+              }}
+            >
               <Text style={styles.actionBtnIcon}>📞</Text>
               <Text style={styles.actionBtnText}>Call</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.actionBtn}>
+            <TouchableOpacity
+              style={styles.actionBtn}
+              disabled={ride?.driverId == null}
+              onPress={() => {
+                if (rideId !== null && ride?.driverId != null) {
+                  router.push({
+                    pathname: "/(passenger)/chat",
+                    params: { rideId: String(rideId) },
+                  } as any);
+                }
+              }}
+            >
               <Text style={styles.actionBtnIcon}>💬</Text>
               <Text style={styles.actionBtnText}>Message</Text>
             </TouchableOpacity>
