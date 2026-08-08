@@ -116,6 +116,7 @@ export default function PassengerHomeScreen() {
   const router = useRouter();
   const { user } = useRideX();
   const [destination, setDestination] = useState("");
+  const [recenter, setRecenter] = useState<{ lat: number; lng: number; nonce: number } | null>(null);
   // Coordinates of the chosen destination (from popular place or geocoded search)
   const [destCoords, setDestCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [selectedRide, setSelectedRide] = useState<RideType>("comfort");
@@ -278,7 +279,6 @@ export default function PassengerHomeScreen() {
       <View style={{ ...StyleSheet.absoluteFillObject }}>
         <RideMap
           markers={[
-            ...(myPos ? [{ id: "me", lat: myPos.lat, lng: myPos.lng, emoji: "🟢" }] : []),
             ...(destCoords ? [{ id: "dest", lat: destCoords.lat, lng: destCoords.lng, emoji: "🔴" }] : []),
             // Real online drivers around the passenger
             ...nearbyDrivers
@@ -290,6 +290,7 @@ export default function PassengerHomeScreen() {
                 emoji: "🚗",
               })),
           ]}
+          userLocation={myPos}
           line={
             myPos && destCoords
               ? [
@@ -298,6 +299,7 @@ export default function PassengerHomeScreen() {
                 ]
               : undefined
           }
+          center={recenter}
         />
       </View>
 
@@ -345,7 +347,14 @@ export default function PassengerHomeScreen() {
 
       {/* Map controls */}
       <View style={styles.mapControls}>
-        <TouchableOpacity style={styles.mapBtn}>
+        <TouchableOpacity
+          style={styles.mapBtn}
+          onPress={() => {
+            if (myPos) {
+              setRecenter({ lat: myPos.lat, lng: myPos.lng, nonce: Date.now() });
+            }
+          }}
+        >
           <Text style={styles.mapBtnIcon}>🎯</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.mapBtn}>

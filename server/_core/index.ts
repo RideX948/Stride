@@ -8,6 +8,8 @@ import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { initRealtime } from "../realtime/ws";
+import { startRideSweeper } from "../rideSweeper";
+import { startPaymentSweeper } from "../paymentSweeper";
 import { registerAzaRoutes } from "../azaWebhook";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -81,6 +83,12 @@ async function startServer() {
 
   // Realtime push channel (WebSocket) at /api/ws
   initRealtime(server);
+
+  // Expire stale "searching" rides in the background
+  startRideSweeper();
+
+  // Reconcile pending Aza payments (webhook safety net; live mode only)
+  startPaymentSweeper();
 
   if (port !== preferredPort) {
     console.log(`Port ${preferredPort} is busy, using port ${port} instead`);

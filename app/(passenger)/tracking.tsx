@@ -16,6 +16,7 @@ import { trpc } from "@/lib/trpc";
 import { useRideX } from "@/lib/ridex-context";
 import { distanceKm, etaMinutes } from "@/hooks/use-driver-location";
 import { useRealtimeConnected, useRealtimeTopic } from "@/hooks/use-realtime";
+import { useRoute } from "@/hooks/use-route";
 import { RideMap, type RideMapMarker } from "@/components/ride-map";
 
 const { width, height } = Dimensions.get("window");
@@ -206,9 +207,27 @@ export default function TrackingScreen() {
       ? distanceKm(driverLat!, driverLng!, targetLat, targetLng)
       : null;
 
+  // ── Road-shaped route for the map (Bolt-style) ──
+  // Driver on the way → route driver→pickup; trip started → driver→destination;
+  // no driver GPS yet → the full pickup→destination leg.
   const isOver = tripStatus === "completed" || tripStatus === "arrived" || tripStatus === "cancelled";
+  const routeFrom = hasLiveGps
+    ? { lat: driverLat!, lng: driverLng! }
+    : ride?.pickupLat != null && ride?.pickupLng != null
+      ? { lat: ride.pickupLat, lng: ride.pickupLng }
+      : null;
+  const routeTo =
+    targetLat != null && targetLng != null ? { lat: targetLat, lng: targetLng } : null;
+  const road = useRoute(routeFrom, routeTo, !isOver && ride != null);
+
   const remainingKm = isOver ? 0 : liveKm ?? parseFloat(ride?.distanceKm ?? "0");
-  const remainingMin = isOver ? 0 : liveKm != null ? etaMinutes(liveKm) : ride?.durationMin ?? 0;
+  const remainingMin = isOver
+    ? 0
+    : road.durationMin != null && !road.isEstimated
+    ? road.durationMin // road-accurate ETA from OSRM
+    : liveKm != null
+    ? etaMinutes(liveKm)
+    : ride?.durationMin ?? 0;
 
   // Progress: with GPS, how much of the leg is covered; else the phase default
   const totalLegKm = parseFloat(ride?.distanceKm ?? "0");
@@ -296,7 +315,13 @@ export default function TrackingScreen() {
     router.replace("/(passenger)/home" as any);
   };
 
-  // Build map markers from live data
+  // Build map markers from live data.
+  // Car position: live WS GPS wins; fall back to the driver profile's stored
+  // position (written when they last moved) so the car appears immediately
+  // on accept even before the next GPS tick.
+  const carLat = driverLat ?? d?.currentLat;
+  const carLng = driverLng ?? d?.currentLng;
+
   const mapMarkers: RideMapMarker[] = [];
   if (ride?.pickupLat != null && ride?.pickupLng != null) {
     mapMarkers.push({ id: "pickup", lat: ride.pickupLat, lng: ride.pickupLng, emoji: "📍" });
@@ -304,8 +329,10 @@ export default function TrackingScreen() {
   if (ride?.destinationLat != null && ride?.destinationLng != null) {
     mapMarkers.push({ id: "dest", lat: ride.destinationLat, lng: ride.destinationLng, emoji: "🔴" });
   }
-  if (driverLat != null && driverLng != null) {
-    mapMarkers.push({ id: "driver", lat: driverLat, lng: driverLng, emoji: "🚗" });
+  // Show car whenever we have any position (stored or live); moving:true lets
+  // the native marker view re-render as coordinates change.
+  if (carLat != null && carLng != null && tripStatus !== "searching") {
+    mapMarkers.push({ id: "driver", lat: carLat, lng: carLng, emoji: "🚗", moving: true });
   }
   const mapLine =
     ride?.pickupLat != null && ride?.destinationLat != null
@@ -319,7 +346,12 @@ export default function TrackingScreen() {
     <View style={styles.container}>
       {/* Real Map */}
       <View style={styles.mapArea}>
-        <RideMap markers={mapMarkers} line={mapLine} />
+        <RideMap
+          markers={mapMarkers}
+          line={mapLine}
+          route={road.coords}
+          follow={!isOver && carLat != null && carLng != null ? { lat: carLat, lng: carLng } : null}
+        />
 
         {/* Progress bar at top */}
         <SafeAreaView edges={["top"]} style={styles.progressBarWrap}>
@@ -496,7 +528,18 @@ export default function TrackingScreen() {
           </TouchableOpacity>
         )}
 
-        {/* Back home (when cancelled) */}
+        {/* Back home / retry (when cancelled) */}
+        {tripStatus === "cancelled" && ride?.status === "no_driver_found" && (
+          <TouchableOpacity
+            style={[styles.completeBtn, { marginBottom: 8 }]}
+            onPress={async () => {
+              await rideStore.clearActiveRide();
+              router.replace("/(passenger)/booking" as any);
+            }}
+          >
+            <Text style={styles.completeBtnText}>Request Another Ride</Text>
+          </TouchableOpacity>
+        )}
         {tripStatus === "cancelled" && (
           <TouchableOpacity
             style={[styles.completeBtn, { backgroundColor: COLORS.surface2 }]}

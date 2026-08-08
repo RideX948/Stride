@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import * as Location from "expo-location";
 import { RideMap } from "@/components/ride-map";
+import { useRoute } from "@/hooks/use-route";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { trpc } from "@/lib/trpc";
 import { useRideX } from "@/lib/ridex-context";
@@ -154,6 +155,12 @@ export default function BookingScreen() {
   const pickupLat = paramPickupLat ?? gpsPickup?.lat ?? 5.6037;
   const pickupLng = paramPickupLng ?? gpsPickup?.lng ?? -0.187;
   const pickupIsReal = paramPickupLat != null || gpsPickup != null;
+
+  // Road-shaped preview line for the mini map
+  const roadPreview = useRoute(
+    { lat: pickupLat, lng: pickupLng },
+    { lat: destLat, lng: destLng },
+  );
 
   // Reverse-geocode the pickup coords into a human-readable place name so the
   // DRIVER sees a real address ("Adum Road, Kumasi"), not "Current Location".
@@ -305,6 +312,7 @@ export default function BookingScreen() {
             { lat: pickupLat, lng: pickupLng },
             { lat: destLat, lng: destLng },
           ]}
+          route={roadPreview.coords}
         />
         <View style={styles.miniMapInfo} pointerEvents="none">
           <Text style={styles.miniMapInfoText}>{realDistanceKm} km · {realDurationMin} min</Text>

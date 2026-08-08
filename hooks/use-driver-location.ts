@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Platform } from "react-native";
 import * as Location from "expo-location";
 import { trpc } from "@/lib/trpc";
@@ -9,6 +9,8 @@ const MIN_DISTANCE_M = 15;
 /**
  * While `enabled`, watches the device position and streams it to the server
  * via driver.updateLocation (throttled to every ~5s / 15m of movement).
+ * Also returns the latest local position so the driver map can show the car
+ * moving without waiting for a server round-trip.
  *
  * Works on native (expo-location, asks foreground permission) and web
  * (navigator.geolocation). Stops cleanly when `enabled` flips off or the
@@ -20,6 +22,7 @@ export function useDriverLocation(driverId: number | undefined, enabled: boolean
   const mutateRef = useRef(updateLocation.mutate);
   mutateRef.current = updateLocation.mutate;
   const lastSentRef = useRef<number>(0);
+  const [livePos, setLivePos] = useState<{ lat: number; lng: number } | null>(null);
 
   useEffect(() => {
     if (!driverId || !enabled) return;
@@ -29,6 +32,8 @@ export function useDriverLocation(driverId: number | undefined, enabled: boolean
     let nativeSub: Location.LocationSubscription | null = null;
 
     const send = (lat: number, lng: number) => {
+      // Always update local state immediately for the driver's own map
+      setLivePos({ lat, lng });
       const now = Date.now();
       if (now - lastSentRef.current < UPDATE_INTERVAL_MS) return;
       lastSentRef.current = now;
@@ -77,6 +82,8 @@ export function useDriverLocation(driverId: number | undefined, enabled: boolean
       nativeSub?.remove();
     };
   }, [driverId, enabled]);
+
+  return livePos;
 }
 
 /** Haversine distance in km between two coordinates. */

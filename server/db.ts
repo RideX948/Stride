@@ -432,6 +432,57 @@ export async function routeDistance(lat1: number, lng1: number, lat2: number, ln
   return { ...estimateDistance(lat1, lng1, lat2, lng2), estimated: true };
 }
 
+/**
+ * Road-shaped route geometry via OSRM (same public API as routeDistance, but
+ * with the full polyline). Falls back to a straight 2-point line so the map
+ * always has something to draw. Cached in-memory — roads don't move, and the
+ * client polls; keep the public OSRM server out of the hot path.
+ */
+type RouteGeometry = { coords: { lat: number; lng: number }[]; distanceKm: number; durationMin: number; estimated: boolean };
+const routeGeoCache = new Map<string, RouteGeometry>();
+
+export async function routeGeometry(lat1: number, lng1: number, lat2: number, lng2: number): Promise<RouteGeometry> {
+  // ~11m key resolution: nearby requests share a cache entry
+  const key = [lat1, lng1, lat2, lng2].map((n) => n.toFixed(4)).join(",");
+  const cached = routeGeoCache.get(key);
+  if (cached) return cached;
+
+  try {
+    const url = `https://router.project-osrm.org/route/v1/driving/${lng1},${lat1};${lng2},${lat2}?overview=full&geometries=geojson`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    const data = await res.json();
+    const route = data?.routes?.[0];
+    if (data?.code === "Ok" && route?.geometry?.coordinates?.length > 1) {
+      const result: RouteGeometry = {
+        // GeoJSON is [lng, lat]
+        coords: route.geometry.coordinates.map(([lng, lat]: [number, number]) => ({ lat, lng })),
+        distanceKm: parseFloat((route.distance / 1000).toFixed(2)),
+        durationMin: Math.max(1, Math.ceil(route.duration / 60)),
+        estimated: false,
+      };
+      if (routeGeoCache.size >= 200) {
+        // naive eviction: drop the oldest entry
+        const first = routeGeoCache.keys().next().value;
+        if (first !== undefined) routeGeoCache.delete(first);
+      }
+      routeGeoCache.set(key, result);
+      return result;
+    }
+  } catch (err) {
+    console.warn("[routeGeometry] OSRM failed, straight-line fallback:", (err as Error).message);
+  }
+  // Fallback: straight line (what the map drew before) — NOT cached, so a
+  // later request retries OSRM once it recovers.
+  return {
+    coords: [{ lat: lat1, lng: lng1 }, { lat: lat2, lng: lng2 }],
+    ...estimateDistance(lat1, lng1, lat2, lng2),
+    estimated: true,
+  };
+}
+
 // ─── Rides ────────────────────────────────────────────────────────────────────
 
 export async function createRide(data: typeof rides.$inferInsert) {
@@ -466,9 +517,14 @@ export async function updateRideStatus(rideId: number, status: typeof rides.$inf
 export async function acceptRide(rideId: number, driverId: number) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  const ride = await getRideById(rideId);
-  if (!ride || ride.status !== "searching") throw new Error("Ride not available");
-  await updateRideStatus(rideId, "accepted", { driverId });
+  // Atomic conditional update: only one driver can win the searching→accepted
+  // transition; a concurrent accept (or the expiry sweeper) sees zero rows.
+  const updated = await db.update(rides)
+    .set({ status: "accepted", driverId, acceptedAt: new Date() })
+    .where(and(eq(rides.id, rideId), eq(rides.status, "searching")))
+    .returning({ id: rides.id });
+  if (!updated.length) throw new Error("Ride not available");
+  await db.insert(rideStatusHistory).values({ rideId, status: "accepted" });
 }
 
 export async function completeRide(rideId: number) {
@@ -560,6 +616,26 @@ export async function getDemandPoints() {
     .from(rides)
     .where(eq(rides.status, "searching"))
     .limit(50);
+}
+
+/**
+ * Expire searching rides older than the cutoff. Atomic per-row: a ride a
+ * driver accepts in the same instant is skipped (both sides condition on
+ * status='searching'). Returns the expired rides for notification fan-out.
+ */
+export async function expireStaleSearchingRides(cutoff: Date) {
+  const db = await getDb();
+  if (!db) return [];
+  const expired = await db.update(rides)
+    .set({ status: "no_driver_found" })
+    .where(and(eq(rides.status, "searching"), lte(rides.requestedAt, cutoff)))
+    .returning({ id: rides.id, passengerId: rides.passengerId });
+  if (expired.length) {
+    await db.insert(rideStatusHistory).values(
+      expired.map((r) => ({ rideId: r.id, status: "no_driver_found" as const })),
+    );
+  }
+  return expired;
 }
 
 // ─── Ratings ──────────────────────────────────────────────────────────────────
@@ -862,6 +938,23 @@ export async function getPaymentByReference(reference: string) {
   if (!db) return null;
   const result = await db.select().from(payments).where(eq(payments.reference, reference)).limit(1);
   return result[0] ?? null;
+}
+
+/**
+ * Pending Aza payments old enough to reconcile against the provider
+ * (created before the cutoff, with a provider session to ask about).
+ */
+export async function getPendingProviderPayments(cutoff: Date) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(payments)
+    .where(and(
+      eq(payments.status, "pending"),
+      lte(payments.createdAt, cutoff),
+      sql`${payments.providerRef} IS NOT NULL`,
+    ))
+    .orderBy(payments.createdAt)
+    .limit(25);
 }
 
 export async function getPaymentById(id: number) {

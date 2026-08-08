@@ -43,6 +43,18 @@ const ridesRouter = router({
       return { ...fare, distanceKm, durationMin, estimated };
     }),
 
+  // Road-shaped route polyline for the map (OSRM; falls back to straight line)
+  routeGeometry: publicProcedure
+    .input(z.object({
+      fromLat: z.number(),
+      fromLng: z.number(),
+      toLat: z.number(),
+      toLng: z.number(),
+    }))
+    .query(async ({ input }) => {
+      return db.routeGeometry(input.fromLat, input.fromLng, input.toLat, input.toLng);
+    }),
+
   // Request a ride
   request: publicProcedure
     .input(z.object({

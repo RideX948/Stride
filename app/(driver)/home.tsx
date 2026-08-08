@@ -17,6 +17,7 @@ import { useRideX } from "@/lib/ridex-context";
 import { NotificationsBell } from "@/components/notifications-bell";
 import { useDriverLocation } from "@/hooks/use-driver-location";
 import { useRealtimeConnected, useRealtimeTopic } from "@/hooks/use-realtime";
+import { useRoute } from "@/hooks/use-route";
 import { RideMap, type RideMapMarker } from "@/components/ride-map";
 
 const COLORS = {
@@ -85,7 +86,8 @@ export default function DriverHomeScreen() {
   useRealtimeTopic(activeRide ? `ride:${activeRide.id}` : null);
 
   // Stream real GPS to the server while online (or mid-ride even if toggled off)
-  useDriverLocation(driverId, isOnline || !!activeRide);
+  // livePos updates every GPS tick — use it directly for the driver's own map marker
+  const livePos = useDriverLocation(driverId, isOnline || !!activeRide);
 
   // 📊 Demand: toggle live pickup points of currently-searching rides onto the map
   const [showDemand, setShowDemand] = useState(false);
@@ -96,11 +98,13 @@ export default function DriverHomeScreen() {
   const demandPoints = demandQuery.data ?? [];
 
   // Map markers: driver's own live position + active ride pickup/destination
+  // livePos (from the GPS hook) updates every tick without a server round-trip;
+  // fall back to the stored profile position on first load before GPS arrives.
   const driverMapMarkers: RideMapMarker[] = [];
-  const pLat = profileQuery.data?.currentLat;
-  const pLng = profileQuery.data?.currentLng;
+  const pLat = livePos?.lat ?? profileQuery.data?.currentLat;
+  const pLng = livePos?.lng ?? profileQuery.data?.currentLng;
   if (pLat != null && pLng != null) {
-    driverMapMarkers.push({ id: "me", lat: pLat, lng: pLng, emoji: "🚗" });
+    driverMapMarkers.push({ id: "me", lat: pLat, lng: pLng, emoji: "🚗", moving: true });
   }
   if (activeRide?.pickupLat != null && activeRide?.pickupLng != null) {
     driverMapMarkers.push({
@@ -125,6 +129,22 @@ export default function DriverHomeScreen() {
           { lat: activeRide.destinationLat, lng: activeRide.destinationLng },
         ]
       : undefined;
+
+  // Road route for the active ride: my position → pickup until the trip
+  // starts, then my position → destination (falls back to pickup→destination
+  // until my GPS arrives).
+  const headingToPickup = activeRide?.status === "accepted" || activeRide?.status === "arriving";
+  const legTargetLat = headingToPickup ? activeRide?.pickupLat : activeRide?.destinationLat;
+  const legTargetLng = headingToPickup ? activeRide?.pickupLng : activeRide?.destinationLng;
+  const driverRoad = useRoute(
+    pLat != null && pLng != null
+      ? { lat: pLat, lng: pLng }
+      : activeRide?.pickupLat != null && activeRide?.pickupLng != null
+        ? { lat: activeRide.pickupLat, lng: activeRide.pickupLng }
+        : null,
+    legTargetLat != null && legTargetLng != null ? { lat: legTargetLat, lng: legTargetLng } : null,
+    activeRide != null,
+  );
 
   // Live demand pins (🔥) when the Demand layer is toggled on
   if (showDemand) {
@@ -382,7 +402,13 @@ export default function DriverHomeScreen() {
       {/* Map Area */}
       <View style={styles.mapArea}>
         {/* Real Map — driver's live position + active pickup/destination + demand */}
-        <RideMap markers={driverMapMarkers} line={driverMapLine} center={recenter} />
+        <RideMap
+          markers={driverMapMarkers}
+          line={driverMapLine}
+          route={activeRide ? driverRoad.coords : undefined}
+          follow={activeRide && pLat != null && pLng != null ? { lat: pLat, lng: pLng } : null}
+          center={recenter}
+        />
 
         {/* Waiting for requests banner */}
         {isOnline && !activeRide && (

@@ -29,12 +29,17 @@ export function createTRPCClient() {
           const token = await Auth.getSessionToken();
           return token ? { Authorization: `Bearer ${token}` } : {};
         },
-        // Custom fetch to include credentials for cookie-based auth
+        // Custom fetch with a timeout so the session check on launch fails
+        // fast when the server is unreachable (changed hotspot IP, server not
+        // started yet) instead of hanging forever on the splash screen.
         fetch(url, options) {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 8000);
           return fetch(url, {
             ...options,
             credentials: "include",
-          });
+            signal: controller.signal,
+          }).finally(() => clearTimeout(timer));
         },
       }),
     ],

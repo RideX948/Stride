@@ -62,6 +62,13 @@ export default function AuthScreen() {
   // ── Session check on launch ──
   // If the server recognizes our session (cookie on web, bearer token on
   // native), skip the login form and route straight into the app.
+  // Hard 10s timeout: if the server is unreachable (hotspot IP changed, server
+  // not started) we must not stay stuck on the splash forever.
+  useEffect(() => {
+    const bail = setTimeout(() => setCheckingSession(false), 10000);
+    return () => clearTimeout(bail);
+  }, []);
+
   useEffect(() => {
     if (meQuery.isLoading || ridexLoading) return;
 

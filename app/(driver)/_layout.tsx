@@ -75,10 +75,6 @@ export default function DriverLayout() {
         }}
       />
       <Tabs.Screen
-        name="incoming-request"
-        options={{ href: null }}
-      />
-      <Tabs.Screen
         name="chat"
         options={{ href: null, tabBarStyle: { display: "none" } }}
       />
