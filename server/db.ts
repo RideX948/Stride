@@ -27,6 +27,7 @@ import {
 import { ENV } from "./_core/env";
 import { realtimeBus } from "./realtime/bus";
 import * as aza from "./aza";
+import { sendPushNotification } from "./push";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -817,6 +818,17 @@ export async function createNotification(data: typeof notifications.$inferInsert
   // Single realtime hook covering every notification call site: nudge the
   // recipient to refetch their unread count / list.
   realtimeBus.publish({ kind: "user", userId: data.userId }, { type: "notification:new" });
+
+  // Send push notification if user has a token
+  const token = await getPushToken(data.userId);
+  if (token) {
+    sendPushNotification({
+      to: token,
+      title: data.title,
+      body: data.body,
+      data: data.data ? JSON.parse(data.data) : undefined,
+    }).catch((err) => console.warn("[push] Failed to send:", err));
+  }
 }
 
 export async function getUserNotifications(userId: number, limit = 20) {
@@ -843,6 +855,21 @@ export async function getUnreadNotificationCount(userId: number) {
   const result = await db.select({ count: sql<number>`count(*)::int` }).from(notifications)
     .where(and(eq(notifications.userId, userId), eq(notifications.isRead, false)));
   return result[0]?.count ?? 0;
+}
+
+// ─── Push Tokens ──────────────────────────────────────────────────────────────
+
+export async function savePushToken(userId: number, token: string) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(users).set({ expoPushToken: token }).where(eq(users.id, userId));
+}
+
+export async function getPushToken(userId: number): Promise<string | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db.select({ expoPushToken: users.expoPushToken }).from(users).where(eq(users.id, userId));
+  return result[0]?.expoPushToken ?? null;
 }
 
 // ─── Support ──────────────────────────────────────────────────────────────────

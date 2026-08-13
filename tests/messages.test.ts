@@ -22,6 +22,7 @@ function makeUser(id: number): AuthenticatedUser {
     loginMethod: "phone",
     role: "user",
     appRole: null,
+    expoPushToken: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),

@@ -18,6 +18,8 @@ import { distanceKm, etaMinutes } from "@/hooks/use-driver-location";
 import { useRealtimeConnected, useRealtimeTopic } from "@/hooks/use-realtime";
 import { useRoute } from "@/hooks/use-route";
 import { RideMap, type RideMapMarker } from "@/components/ride-map";
+import { getRoute as getMapboxRoute } from "@/lib/mapbox";
+import { ActivityIndicator } from "react-native";
 
 const { width, height } = Dimensions.get("window");
 
@@ -342,6 +344,24 @@ export default function TrackingScreen() {
         ]
       : undefined;
 
+  // Mapbox demo route state
+  const [mapboxRoute, setMapboxRoute] = useState<{ lat: number; lng: number }[] | null>(null);
+  const [mapboxLoading, setMapboxLoading] = useState(false);
+
+  const fetchMapbox = async () => {
+    if (!routeFrom || !routeTo) return;
+    setMapboxLoading(true);
+    try {
+      const r = await getMapboxRoute(routeFrom, routeTo);
+      setMapboxRoute(r.geometry);
+    } catch (err) {
+      console.warn("[Mapbox] route failed:", err);
+      setMapboxRoute(null);
+    } finally {
+      setMapboxLoading(false);
+    }
+  };
+
   return (
     <View style={styles.container}>
       {/* Real Map */}
@@ -349,7 +369,7 @@ export default function TrackingScreen() {
         <RideMap
           markers={mapMarkers}
           line={mapLine}
-          route={road.coords}
+          route={mapboxRoute ?? road.coords}
           follow={!isOver && carLat != null && carLng != null ? { lat: carLat, lng: carLng } : null}
         />
 
@@ -500,6 +520,21 @@ export default function TrackingScreen() {
             >
               <Text style={styles.actionBtnIcon}>💬</Text>
               <Text style={styles.actionBtnText}>Message</Text>
+            </TouchableOpacity>
+            {/* Mapbox demo button: fetch in-app route from Mapbox and draw it on the map */}
+            <TouchableOpacity
+              style={styles.actionBtn}
+              onPress={() => fetchMapbox()}
+              disabled={!routeFrom || !routeTo || mapboxLoading}
+            >
+              {mapboxLoading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <>
+                  <Text style={styles.actionBtnIcon}>🗺️</Text>
+                  <Text style={styles.actionBtnText}>In-app route</Text>
+                </>
+              )}
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.actionBtn, styles.sosBtnStyle]}

@@ -10,6 +10,7 @@ import { initRealtime } from "../realtime/ws";
 import { startRideSweeper } from "../rideSweeper";
 import { startPaymentSweeper } from "../paymentSweeper";
 import { registerAzaRoutes } from "../azaWebhook";
+import { registerMapboxRoutes } from "./mapbox";
 
 async function startServer() {
   const app = express();
@@ -44,6 +45,7 @@ async function startServer() {
 
   registerStorageProxy(app);
   registerOAuthRoutes(app);
+  registerMapboxRoutes(app);
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, timestamp: Date.now() });

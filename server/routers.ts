@@ -663,6 +663,13 @@ const notificationsRouter = router({
       await db.markAllNotificationsRead(input.userId);
       return { success: true };
     }),
+
+  registerPushToken: publicProcedure
+    .input(z.object({ userId: z.number(), token: z.string() }))
+    .mutation(async ({ input }) => {
+      await db.savePushToken(input.userId, input.token);
+      return { success: true };
+    }),
 });
 
 // ─── Support Router ───────────────────────────────────────────────────────────

@@ -52,6 +52,7 @@ export const users = pgTable("users", {
   // Separate from `role`, which is for admin permissions.
   appRole: varchar("appRole", { length: 16 }),
   loginMethod: varchar("loginMethod", { length: 32 }).default("oauth"),
+  expoPushToken: text("expoPushToken"),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
