@@ -223,7 +223,7 @@ export default function TrackingScreen() {
   // Use Mapbox-powered route for in-app navigation (falls back to server road if missing)
   // The useMapboxRoute hook replaces the older useRoute for the active leg.
   // We still keep the `road` variable name for compatibility with downstream code.
-  const mapboxRoad = useMapboxRoute(routeFrom, routeTo, !isOver && ride != null);
+  const mapboxRoad = useMapboxRoute(routeFrom, routeTo, !isOver && ride != null, 15000, driverLat != null && driverLng != null ? { lat: driverLat, lng: driverLng } : null, 40);
   const road = {
     coords: mapboxRoad.coords ?? undefined,
     distanceKm: mapboxRoad.distanceKm ?? undefined,
@@ -354,7 +354,7 @@ export default function TrackingScreen() {
       : undefined;
 
   // Simple navigation instruction hook (announces next maneuver and provides text)
-  const nav = useNavigationInstructions(mapboxRoad.steps, carLat != null && carLng != null ? { lat: carLat!, lng: carLng! } : null, true);
+  const nav = useNavigationInstructions(mapboxRoad.steps, driverLat != null && driverLng != null ? { lat: driverLat, lng: driverLng } : null, true);
 
   return (
     <View style={styles.container}>
