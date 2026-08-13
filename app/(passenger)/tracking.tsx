@@ -18,8 +18,8 @@ import { distanceKm, etaMinutes } from "@/hooks/use-driver-location";
 import { useRealtimeConnected, useRealtimeTopic } from "@/hooks/use-realtime";
 import { useRoute } from "@/hooks/use-route";
 import { RideMap, type RideMapMarker } from "@/components/ride-map";
-import { getRoute as getMapboxRoute } from "@/lib/mapbox";
-import { ActivityIndicator } from "react-native";
+import { useMapboxRoute } from "@/hooks/use-mapbox-route";
+import { useNavigationInstructions } from "@/hooks/use-navigation-instructions";
 
 const { width, height } = Dimensions.get("window");
 
@@ -220,13 +220,22 @@ export default function TrackingScreen() {
       : null;
   const routeTo =
     targetLat != null && targetLng != null ? { lat: targetLat, lng: targetLng } : null;
-  const road = useRoute(routeFrom, routeTo, !isOver && ride != null);
+  // Use Mapbox-powered route for in-app navigation (falls back to server road if missing)
+  // The useMapboxRoute hook replaces the older useRoute for the active leg.
+  // We still keep the `road` variable name for compatibility with downstream code.
+  const mapboxRoad = useMapboxRoute(routeFrom, routeTo, !isOver && ride != null);
+  const road = {
+    coords: mapboxRoad.coords ?? undefined,
+    distanceKm: mapboxRoad.distanceKm ?? undefined,
+    durationMin: mapboxRoad.durationMin ?? undefined,
+    isEstimated: mapboxRoad.coords == null,
+  } as any;
 
-  const remainingKm = isOver ? 0 : liveKm ?? parseFloat(ride?.distanceKm ?? "0");
+  const remainingKm = isOver ? 0 : liveKm ?? mapboxRoad.distanceKm ?? parseFloat(ride?.distanceKm ?? "0");
   const remainingMin = isOver
     ? 0
-    : road.durationMin != null && !road.isEstimated
-    ? road.durationMin // road-accurate ETA from OSRM
+    : mapboxRoad.durationMin != null && !road.isEstimated
+    ? mapboxRoad.durationMin
     : liveKm != null
     ? etaMinutes(liveKm)
     : ride?.durationMin ?? 0;
@@ -344,23 +353,8 @@ export default function TrackingScreen() {
         ]
       : undefined;
 
-  // Mapbox demo route state
-  const [mapboxRoute, setMapboxRoute] = useState<{ lat: number; lng: number }[] | null>(null);
-  const [mapboxLoading, setMapboxLoading] = useState(false);
-
-  const fetchMapbox = async () => {
-    if (!routeFrom || !routeTo) return;
-    setMapboxLoading(true);
-    try {
-      const r = await getMapboxRoute(routeFrom, routeTo);
-      setMapboxRoute(r.geometry);
-    } catch (err) {
-      console.warn("[Mapbox] route failed:", err);
-      setMapboxRoute(null);
-    } finally {
-      setMapboxLoading(false);
-    }
-  };
+  // Simple navigation instruction hook (announces next maneuver and provides text)
+  const nav = useNavigationInstructions(mapboxRoad.steps, carLat != null && carLng != null ? { lat: carLat!, lng: carLng! } : null, true);
 
   return (
     <View style={styles.container}>
@@ -369,7 +363,7 @@ export default function TrackingScreen() {
         <RideMap
           markers={mapMarkers}
           line={mapLine}
-          route={mapboxRoute ?? road.coords}
+          route={road.coords}
           follow={!isOver && carLat != null && carLng != null ? { lat: carLat, lng: carLng } : null}
         />
 
@@ -418,16 +412,25 @@ export default function TrackingScreen() {
 
         {/* ETA & Distance */}
         {tripStatus !== "searching" && remainingMin > 0 && (
-          <View style={styles.etaRow}>
-            <Text style={styles.etaIcon}>⏱</Text>
-            <Text style={styles.etaInfo}>{Math.ceil(remainingMin)} min remaining</Text>
-            <Text style={styles.etaDot}>·</Text>
-            <Text style={styles.etaInfo}>{remainingKm.toFixed(1)} km</Text>
-            {hasLiveGps && (
-              <>
-                <Text style={styles.etaDot}>·</Text>
-                <Text style={styles.liveTag}>● LIVE</Text>
-              </>
+          <View>
+            <View style={styles.etaRow}>
+              <Text style={styles.etaIcon}>⏱</Text>
+              <Text style={styles.etaInfo}>{Math.ceil(remainingMin)} min remaining</Text>
+              <Text style={styles.etaDot}>·</Text>
+              <Text style={styles.etaInfo}>{remainingKm.toFixed(1)} km</Text>
+              {hasLiveGps && (
+                <>
+                  <Text style={styles.etaDot}>·</Text>
+                  <Text style={styles.liveTag}>● LIVE</Text>
+                </>
+              )}
+            </View>
+
+            {nav?.nextInstruction && (
+              <View style={{ flexDirection: "row", alignItems: "center", marginTop: 6 }}>
+                <Text style={{ color: COLORS.muted, marginRight: 8 }}>Next:</Text>
+                <Text style={{ color: COLORS.foreground, flex: 1 }}>{nav.nextInstruction}</Text>
+              </View>
             )}
           </View>
         )}
@@ -520,21 +523,6 @@ export default function TrackingScreen() {
             >
               <Text style={styles.actionBtnIcon}>💬</Text>
               <Text style={styles.actionBtnText}>Message</Text>
-            </TouchableOpacity>
-            {/* Mapbox demo button: fetch in-app route from Mapbox and draw it on the map */}
-            <TouchableOpacity
-              style={styles.actionBtn}
-              onPress={() => fetchMapbox()}
-              disabled={!routeFrom || !routeTo || mapboxLoading}
-            >
-              {mapboxLoading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <>
-                  <Text style={styles.actionBtnIcon}>🗺️</Text>
-                  <Text style={styles.actionBtnText}>In-app route</Text>
-                </>
-              )}
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.actionBtn, styles.sosBtnStyle]}
