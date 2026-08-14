@@ -1,3 +1,5 @@
+import { getApiBaseUrl } from "@/constants/oauth";
+
 export type RouteResult = {
   distance: number; // meters
   duration: number; // seconds
@@ -13,7 +15,11 @@ export async function getRoute(origin: { lat: number; lng: number }, dest: { lat
     destLng: String(dest.lng),
   });
 
-  const res = await fetch(`/api/mapbox/directions?${params.toString()}`);
+  const apiBase = getApiBaseUrl();
+  const path = `/api/mapbox/directions?${params.toString()}`;
+  const fetchUrl = apiBase ? `${apiBase.replace(/\/$/, "")}${path}` : path;
+
+  const res = await fetch(fetchUrl);
   if (!res.ok) throw new Error("Failed to fetch route: " + res.statusText);
   const payload = await res.json();
   return payload as RouteResult;
