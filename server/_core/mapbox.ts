@@ -131,6 +131,8 @@ export function registerMapboxRoutes(app: Application) {
 }
 
 // Minimal JSON body parser for the metrics route to avoid coupling to full app.json
+import { insertRerouteEvent } from "../db";
+
 function expressJsonMiddleware(req: Request, res: Response) {
   // This function is registered as the handler for POST /api/internal/metrics
   // but the server already has express.json() globally; in case it's not wired,
@@ -139,6 +141,18 @@ function expressJsonMiddleware(req: Request, res: Response) {
     const body = (req as any).body ?? {};
     if (body && body.event === "reroute") {
       metrics.rerouteEvents++;
+      // best-effort: persist to DB for observability
+      try {
+        const rideId = body.rideId ? Number(body.rideId) : undefined;
+        const driverProfileId = body.driverProfileId ? Number(body.driverProfileId) : undefined;
+        const originLat = body.originLat ? Number(body.originLat) : undefined;
+        const originLng = body.originLng ? Number(body.originLng) : undefined;
+        const destLat = body.destLat ? Number(body.destLat) : undefined;
+        const destLng = body.destLng ? Number(body.destLng) : undefined;
+        insertRerouteEvent({ rideId, driverProfileId, originLat, originLng, destLat, destLng, meta: body.meta ?? null }).catch(() => {});
+      } catch (e) {
+        // ignore
+      }
     }
     res.json({ ok: true });
   } catch (e) {

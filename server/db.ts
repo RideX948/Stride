@@ -18,6 +18,7 @@ import {
   ratings,
   rideStatusHistory,
   rides,
+  rerouteEvents,
   savedPlaces,
   sosAlerts,
   supportTickets,
@@ -269,6 +270,36 @@ export async function updateDriverLocation(driverId: number, lat: number, lng: n
   if (!db) return;
   await db.update(driverProfiles).set({ currentLat: lat, currentLng: lng, lastLocationAt: new Date() })
     .where(eq(driverProfiles.id, driverId));
+}
+
+/** Insert a reroute event for observability. meta is a JSON-serializable object. */
+export async function insertRerouteEvent(data: {
+  rideId?: number | null;
+  driverProfileId?: number | null;
+  originLat?: number | null;
+  originLng?: number | null;
+  destLat?: number | null;
+  destLng?: number | null;
+  meta?: Record<string, unknown> | null;
+}) {
+  const db = await getDb();
+  if (!db) {
+    console.warn('[Database] Cannot log reroute event: database not available');
+    return;
+  }
+  try {
+    await db.insert(rerouteEvents).values({
+      rideId: data.rideId ?? null,
+      driverProfileId: data.driverProfileId ?? null,
+      originLat: data.originLat ?? null,
+      originLng: data.originLng ?? null,
+      destLat: data.destLat ?? null,
+      destLng: data.destLng ?? null,
+      meta: data.meta ? JSON.stringify(data.meta) : null,
+    });
+  } catch (e) {
+    console.warn('[Database] Failed to insert reroute event:', e);
+  }
 }
 
 export async function toggleDriverOnline(driverId: number, isOnline: boolean) {

@@ -383,6 +383,20 @@ export const messages = pgTable("messages", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
+// ─── Reroute events (observability)
+
+export const rerouteEvents = pgTable("reroute_events", {
+  id: serial("id").primaryKey(),
+  rideId: integer("rideId"),
+  driverProfileId: integer("driverProfileId"),
+  originLat: real("originLat"),
+  originLng: real("originLng"),
+  destLat: real("destLat"),
+  destLng: real("destLng"),
+  meta: text("meta"), // JSON string with client hints
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
 // ─── OTP Codes (phone login) ──────────────────────────────────────────────────
 
 export const otpCodes = pgTable("otp_codes", {
