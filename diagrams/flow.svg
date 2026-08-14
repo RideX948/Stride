@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="800" height="300" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300">
+  <style>
+    .box { fill:#0f1a2e; stroke:#00c8ff; stroke-width:2; rx:8; }
+    .text { font-family: Arial, Helvetica, sans-serif; fill:#ffffff; font-size:14px; }
+    .muted { fill:#9fbfd6; font-size:12px; }
+    .arrow { stroke:#00c8ff; stroke-width:2; fill:none; marker-end:url(#arrowhead); }
+  </style>
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#00c8ff" />
+    </marker>
+  </defs>
+
+  <!-- Client -->
+  <rect x="30" y="40" width="200" height="90" class="box" />
+  <text x="40" y="65" class="text">Client (Expo React Native / Web)</text>
+  <text x="40" y="85" class="muted">screens, RideMap, hooks</text>
+
+  <!-- Server -->
+  <rect x="300" y="30" width="220" height="110" class="box" />
+  <text x="320" y="60" class="text">Server (Express + TRPC)</text>
+  <text x="320" y="82" class="muted">Mapbox proxy, WebSocket realtime, DB</text>
+
+  <!-- Mapbox -->
+  <rect x="560" y="40" width="200" height="90" class="box" />
+  <text x="570" y="65" class="text">Mapbox Directions API</text>
+  <text x="570" y="85" class="muted">server-side token</text>
+
+  <!-- arrows -->
+  <path d="M230 85 L300 85" class="arrow" />
+  <path d="M520 85 L560 85" class="arrow" />
+
+  <!-- notes -->
+  <text x="40" y="130" class="muted">Flow: Client requests /api/mapbox/directions ? Server calls Mapbox using MAPBOX_TOKEN ? Server returns geometry/steps ? Client draws route & speaks instructions</text>
+</svg>
