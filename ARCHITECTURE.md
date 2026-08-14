@@ -1,8 +1,8 @@
-RideX Stride — Architecture Overview
+RideX — Architecture Overview
 
 Purpose
 
-This document explains the high-level architecture of RideX Stride, focusing on the in-app Mapbox navigation MVP, how the server and client interact, and where the important code lives.
+This document explains the high-level architecture of RideX, focusing on the in-app Mapbox navigation MVP, how the server and client interact, and where the important code lives.
 
 System overview
 

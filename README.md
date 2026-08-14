@@ -1,8 +1,8 @@
-RideX Stride — In-app ride tracking & navigation MVP
+RideX — In-app ride tracking & navigation MVP
 
 Summary
 
-RideX Stride is a mobile/web app prototype for ride-hailing with in-app route drawing, ETA, basic navigation instructions and automatic rerouting. The app uses a server-side Mapbox Directions proxy to keep the Mapbox token private, a TRPC backend for business logic, and an Expo React Native client for passenger and driver flows.
+RideX is a mobile/web app prototype for ride-hailing with in-app route drawing, ETA, basic navigation instructions and automatic rerouting. The app uses a server-side Mapbox Directions proxy to keep the Mapbox token private, a TRPC backend for business logic, and an Expo React Native client for passenger and driver flows.
 
 Highlights / Differentiators
 

@@ -1,4 +1,4 @@
-﻿Demo Script & Checklist — RideX Stride
+﻿Demo Script & Checklist — RideX
 
 Preparation
 - Start the app: pnpm dev

@@ -1,10 +1,10 @@
 ﻿---
-title: RideX Stride — Demo and Architecture
+title: RideX — Demo and Architecture
 ---
 
 # Welcome
 
-RideX Stride — in-app navigation MVP
+RideX — in-app navigation MVP
 
 Note:
 - Briefly state project goal: an in-app ride tracking and navigation experience with server-side Mapbox proxy.
