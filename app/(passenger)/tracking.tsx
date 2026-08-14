@@ -356,6 +356,8 @@ export default function TrackingScreen() {
   // Simple navigation instruction hook (announces next maneuver and provides text)
   const nav = useNavigationInstructions(mapboxRoad.steps, driverLat != null && driverLng != null ? { lat: driverLat, lng: driverLng } : null, true);
 
+  const showingReroute = mapboxRoad.isRerouting || (mapboxRoad.lastRerouteAt != null && Date.now() - mapboxRoad.lastRerouteAt < 6000);
+
   return (
     <View style={styles.container}>
       {/* Real Map */}
@@ -380,13 +382,20 @@ export default function TrackingScreen() {
         </SafeAreaView>
       </View>
 
+      {/* Reroute banner */}
+      {showingReroute && (
+        <View style={styles.rerouteBanner}>
+          <Text style={styles.rerouteText}>Recalculating route…</Text>
+        </View>
+      )}
+
       {/* Bottom Panel */}
       <View style={styles.bottomPanel}>
         {/* Trip Status */}
         <View style={styles.tripStatusRow}>
           <View>
             <Text style={styles.tripStatusLabel}>TRIP STATUS</Text>
-            <Text style={[styles.tripStatusValue, { color: statusColor[tripStatus] }]}>
+            <Text style={[styles.tripStatusValue, { color: statusColor[tripStatus] }]}> 
               {statusLabel[tripStatus]}
             </Text>
           </View>
@@ -769,6 +778,18 @@ const styles = StyleSheet.create({
   progressFill: {
     height: "100%",
     borderRadius: 2,
+  },
+  rerouteBanner: {
+    backgroundColor: "rgba(0,200,255,0.09)",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  rerouteText: {
+    color: COLORS.primary,
+    fontSize: 13,
+    fontWeight: "700",
   },
   bottomPanel: {
     flex: 1,

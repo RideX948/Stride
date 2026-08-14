@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { LatLng } from "@/hooks/use-route";
 import { getRoute } from "@/lib/mapbox";
+import { getApiBaseUrl } from "@/constants/oauth";
 
 type MaybePos = { lat: number; lng: number } | null | undefined;
 
@@ -55,9 +56,14 @@ export function useMapboxRoute(
   const [distanceKm, setDistanceKm] = useState<number | undefined>(undefined);
   const [durationMin, setDurationMin] = useState<number | undefined>(undefined);
   const [steps, setSteps] = useState<any[] | undefined>(undefined);
+  const [isRerouting, setIsRerouting] = useState(false);
+  const [lastRerouteAt, setLastRerouteAt] = useState<number | null>(null);
+
   const mounted = useRef(true);
   const timer = useRef<number | null>(null);
   const lastFetchAt = useRef<number>(0);
+  const failCount = useRef<number>(0);
+  const lastWarnAt = useRef<number>(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -67,19 +73,44 @@ export function useMapboxRoute(
     };
   }, []);
 
-  async function fetchOnce() {
+  async function delay(ms: number) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  async function fetchOnceWithRetry() {
     if (!enabled || !from || !to) return;
-    try {
-      const r = await getRoute(from, to);
-      if (!mounted.current) return;
-      setCoords(r.geometry);
-      setDistanceKm(r.distance / 1000);
-      setDurationMin(r.duration / 60);
-      setSteps(r.steps ?? []);
-      lastFetchAt.current = Date.now();
-    } catch (err) {
-      console.warn("[useMapboxRoute] fetch failed", err);
+    const maxAttempts = 3;
+    let attempt = 0;
+    while (attempt < maxAttempts) {
+      try {
+        const r = await getRoute(from, to);
+        if (!mounted.current) return;
+        setCoords(r.geometry);
+        setDistanceKm(r.distance / 1000);
+        setDurationMin(r.duration / 60);
+        setSteps(r.steps ?? []);
+        lastFetchAt.current = Date.now();
+        failCount.current = 0;
+        return;
+      } catch (err) {
+        attempt++;
+        failCount.current++;
+        const now = Date.now();
+        // Only log an error infrequently to avoid log spam
+        if (!lastWarnAt.current || now - lastWarnAt.current > 60_000) {
+          console.warn("[useMapboxRoute] fetch attempt", attempt, "failed:", err);
+          lastWarnAt.current = now;
+        }
+        // exponential backoff
+        const backoff = 400 * Math.pow(2, attempt - 1);
+        await delay(backoff);
+      }
     }
+    // after retries, give up quietly (we already warned at most once per minute)
+  }
+
+  async function fetchOnce() {
+    await fetchOnceWithRetry();
   }
 
   useEffect(() => {
@@ -132,7 +163,22 @@ export function useMapboxRoute(
       // throttle: don't refetch more often than 8s
       if (now - lastFetchAt.current > 8000) {
         // immediate fetch
+        setIsRerouting(true);
+        setLastRerouteAt(now);
+        // POST a lightweight metric to the server (best-effort)
+        try {
+          const apiBase = getApiBaseUrl();
+          const url = apiBase ? `${apiBase.replace(/\/$/, "")}/api/internal/metrics` : "/api/internal/metrics";
+          fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ event: "reroute" }) }).catch(() => {});
+        } catch (e) {
+          // ignore
+        }
+        // immediate fetch but don't block UI
         fetchOnce();
+        // reset rerouting flag after a short delay so UI can show transient state
+        setTimeout(() => {
+          setIsRerouting(false);
+        }, 6000);
       }
     }
   }, [currentPosition?.lat, currentPosition?.lng, coords, enabled, offRouteThresholdMeters]);
@@ -142,5 +188,7 @@ export function useMapboxRoute(
     distanceKm,
     durationMin,
     steps,
+    isRerouting,
+    lastRerouteAt,
   };
 }
