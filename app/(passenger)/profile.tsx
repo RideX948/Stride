@@ -39,16 +39,14 @@ export default function PassengerProfileScreen() {
   const { user, logout } = useRideX();
   const userId = Number(user?.id);
 
-  const profileQuery = trpc.passenger.getProfile.useQuery(
-    { userId },
-    { enabled: Number.isFinite(userId) }
-  );
-  const walletQuery = trpc.passenger.getWallet.useQuery(
-    { userId },
-    { enabled: Number.isFinite(userId) }
-  );
+  const profileQuery = trpc.passenger.getProfile.useQuery(undefined, {
+    enabled: Number.isFinite(userId),
+  });
+  const walletQuery = trpc.passenger.getWallet.useQuery(undefined, {
+    enabled: Number.isFinite(userId),
+  });
   const historyQuery = trpc.rides.passengerHistory.useQuery(
-    { passengerId: userId, limit: 50 },
+    { limit: 50 },
     { enabled: Number.isFinite(userId) }
   );
 

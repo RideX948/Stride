@@ -176,28 +176,25 @@ export default function EarningsScreen() {
   const userId = Number(user?.id);
 
   // Resolve the driver profile — earnings rows key off driverProfiles.id
-  const { data: profile, refetch: refetchProfile } = trpc.driver.getProfile.useQuery(
-    { userId },
-    { enabled: Number.isFinite(userId) }
-  );
+  const { data: profile, refetch: refetchProfile } = trpc.driver.getProfile.useQuery(undefined, {
+    enabled: Number.isFinite(userId),
+  });
   const driverId = profile?.id;
 
-  // Fetch real earnings data from backend
   const { data: earningsData } = trpc.driver.earningsSummary.useQuery(
-    { driverId: driverId ?? 0, period: period === "week" ? "week" : "month" },
+    { period: period === "week" ? "week" : "month" },
     { enabled: !!driverId, retry: false }
   );
 
-  const walletQuery = trpc.driver.getWallet.useQuery(
-    { driverId: driverId ?? 0 },
-    { enabled: !!driverId }
-  );
+  const walletQuery = trpc.driver.getWallet.useQuery(undefined, {
+    enabled: !!driverId,
+  });
   const payoutsQuery = trpc.driver.payoutHistory.useQuery(
-    { driverId: driverId ?? 0, limit: 5 },
+    { limit: 5 },
     { enabled: !!driverId }
   );
   const historyQuery = trpc.rides.driverHistory.useQuery(
-    { driverId: driverId ?? 0, limit: 5 },
+    { limit: 5 },
     { enabled: !!driverId }
   );
   const requestPayout = trpc.driver.requestPayout.useMutation();
@@ -211,7 +208,7 @@ export default function EarningsScreen() {
   const handleSaveAza = async () => {
     if (!driverId) return;
     try {
-      await setAzaRecipient.mutateAsync({ driverId, azaRecipient: azaInput.trim() });
+      await setAzaRecipient.mutateAsync({ azaRecipient: azaInput.trim() });
       setEditingAza(false);
       refetchProfile();
     } catch (err) {
@@ -268,7 +265,6 @@ export default function EarningsScreen() {
           onPress: async () => {
             try {
               await requestPayout.mutateAsync({
-                driverId,
                 amount: walletBalance,
                 method: "mobile_money",
               });

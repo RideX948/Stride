@@ -45,19 +45,17 @@ export default function DriverProfileScreen() {
   const { user, logout } = useRideX();
   const userId = Number(user?.id);
 
-  const profileQuery = trpc.driver.getProfile.useQuery(
-    { userId },
-    { enabled: Number.isFinite(userId) }
-  );
+  const profileQuery = trpc.driver.getProfile.useQuery(undefined, {
+    enabled: Number.isFinite(userId),
+  });
   const profile = profileQuery.data;
   const driverId = profile?.id;
 
-  const walletQuery = trpc.driver.getWallet.useQuery(
-    { driverId: driverId ?? 0 },
-    { enabled: !!driverId }
-  );
+  const walletQuery = trpc.driver.getWallet.useQuery(undefined, {
+    enabled: !!driverId,
+  });
   const earningsQuery = trpc.driver.earningsSummary.useQuery(
-    { driverId: driverId ?? 0, period: "week" },
+    { period: "week" },
     { enabled: !!driverId }
   );
   const updateProfile = trpc.driver.updateProfile.useMutation();
@@ -80,7 +78,6 @@ export default function DriverProfileScreen() {
   const handleSaveVehicle = async () => {
     try {
       await updateProfile.mutateAsync({
-        userId,
         vehicleModel: vehicleModel.trim() || undefined,
         vehiclePlate: vehiclePlate.trim() || undefined,
         vehicleColor: vehicleColor.trim() || undefined,

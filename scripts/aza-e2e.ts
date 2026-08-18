@@ -50,7 +50,7 @@ async function main() {
   console.log("user:", user.id);
 
   // Balance before
-  const before = await callTrpc("passenger.getWallet", { userId: user.id }, token, false);
+  const before = await callTrpc("passenger.getWallet", {}, token, false);
   console.log("balance before:", before.balance);
 
   // 1. Create top-up
@@ -82,7 +82,7 @@ async function main() {
   console.log("payment status:", status, status === "completed" ? "PASS" : "FAIL");
 
   // 3. Balance after
-  const after = await callTrpc("passenger.getWallet", { userId: user.id }, token, false);
+  const after = await callTrpc("passenger.getWallet", {}, token, false);
   console.log("balance after:", after.balance);
   const diff = parseFloat(after.balance) - parseFloat(before.balance);
   console.log("credited:", diff.toFixed(2), Math.abs(diff - 25) < 0.001 ? "PASS" : "FAIL");
@@ -102,7 +102,7 @@ async function main() {
     });
     console.log("webhook redelivery:", JSON.stringify(redelivery), redelivery.status === 200 ? "PASS" : "FAIL");
   }
-  const final = await callTrpc("passenger.getWallet", { userId: user.id }, token, false);
+  const final = await callTrpc("passenger.getWallet", {}, token, false);
   console.log("balance unchanged:", final.balance, final.balance === after.balance ? "PASS" : "FAIL");
 
   process.exit(0);

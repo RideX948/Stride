@@ -2,6 +2,16 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { createHash, randomInt } from "crypto";
 import { router, publicProcedure, protectedProcedure } from "./_core/trpc";
+import {
+  requireAuthUser,
+  requireDriverProfile,
+  getRideRole,
+  assertRideParticipant,
+  assertRideDriver,
+  assertDriverCanGoOnline,
+  assertCanViewDriverPublic,
+  assertNotificationOwner,
+} from "./_core/authHelpers";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { COOKIE_NAME, ONE_YEAR_MS } from "../shared/const";
 import { systemRouter } from "./_core/systemRouter";
@@ -55,10 +65,9 @@ const ridesRouter = router({
       return db.routeGeometry(input.fromLat, input.fromLng, input.toLat, input.toLng);
     }),
 
-  // Request a ride
-  request: publicProcedure
+  // Request a ride (passenger identity from session)
+  request: protectedProcedure
     .input(z.object({
-      passengerId: z.number(),
       rideType: z.enum(["economy", "comfort", "premium"]),
       pickupAddress: z.string(),
       pickupLat: z.number(),
@@ -69,7 +78,8 @@ const ridesRouter = router({
       paymentMethod: z.enum(["card", "wallet", "mobile_money", "cash"]).default("cash"),
       promoCode: z.string().optional(),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      const passengerId = requireAuthUser(ctx).id;
       const [{ distanceKm, durationMin }, surge] = await Promise.all([
         db.routeDistance(
           input.pickupLat, input.pickupLng,
@@ -82,13 +92,13 @@ const ridesRouter = router({
       let promoId: number | undefined;
       if (input.promoCode) {
         try {
-          const promo = await db.validatePromoCode(input.promoCode, input.passengerId, parseFloat(fare.estimatedFare));
+          const promo = await db.validatePromoCode(input.promoCode, passengerId, parseFloat(fare.estimatedFare));
           discount = promo.discount;
           promoId = promo.promoId;
         } catch { /* ignore invalid promo */ }
       }
       const rideId = await db.createRide({
-        passengerId: input.passengerId,
+        passengerId,
         rideType: input.rideType,
         pickupAddress: input.pickupAddress,
         pickupLat: input.pickupLat,
@@ -110,7 +120,7 @@ const ridesRouter = router({
       });
       // Notify passenger
       await db.createNotification({
-        userId: input.passengerId,
+        userId: passengerId,
         type: "ride_requested",
         title: "Looking for a driver",
         body: `Searching for a nearby ${input.rideType} driver...`,
@@ -124,44 +134,46 @@ const ridesRouter = router({
       return { rideId, ...fare, distanceKm, durationMin, discount };
     }),
 
-  // Get ride by ID
-  getById: publicProcedure
+  // Get ride by ID (must be a party to the ride)
+  getById: protectedProcedure
     .input(z.object({ rideId: z.number() }))
-    .query(async ({ input }) => {
-      return db.getRideById(input.rideId);
+    .query(async ({ input, ctx }) => {
+      const { ride } = await assertRideParticipant(input.rideId, requireAuthUser(ctx).id);
+      return ride;
     }),
 
-  // Get active ride for passenger
-  getActiveForPassenger: publicProcedure
-    .input(z.object({ passengerId: z.number() }))
-    .query(async ({ input }) => {
-      return db.getActiveRideForPassenger(input.passengerId);
-    }),
+  // Get active ride for the logged-in passenger
+  getActiveForPassenger: protectedProcedure.query(async ({ ctx }) => {
+    return db.getActiveRideForPassenger(requireAuthUser(ctx).id);
+  }),
 
-  // Get active ride for driver
-  getActiveForDriver: publicProcedure
-    .input(z.object({ driverId: z.number() }))
-    .query(async ({ input }) => {
-      return db.getActiveRideForDriver(input.driverId);
-    }),
+  // Get active ride for the logged-in driver
+  getActiveForDriver: protectedProcedure.query(async ({ ctx }) => {
+    const profile = await requireDriverProfile(requireAuthUser(ctx).id);
+    return db.getActiveRideForDriver(profile.id);
+  }),
 
-  // Get pending rides (for driver to pick up). rideType optional: omit to see all.
-  getPending: publicProcedure
+  // Pending rides for online drivers
+  getPending: protectedProcedure
     .input(z.object({ rideType: z.enum(["economy", "comfort", "premium"]).optional() }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
+      await requireDriverProfile(requireAuthUser(ctx).id);
       return db.getPendingRidesForDriver(input.rideType);
     }),
 
-  // Pickup points of currently-searching rides — real demand for the driver map
-  demand: publicProcedure.query(async () => {
+  // Pickup points of currently-searching rides — drivers only
+  demand: protectedProcedure.query(async ({ ctx }) => {
+    await requireDriverProfile(requireAuthUser(ctx).id);
     return db.getDemandPoints();
   }),
 
   // Driver accepts a ride
-  accept: publicProcedure
-    .input(z.object({ rideId: z.number(), driverId: z.number() }))
-    .mutation(async ({ input }) => {
-      await db.acceptRide(input.rideId, input.driverId);
+  accept: protectedProcedure
+    .input(z.object({ rideId: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const profile = await requireDriverProfile(requireAuthUser(ctx).id);
+      const driverId = profile.id;
+      await db.acceptRide(input.rideId, driverId);
       const ride = await db.getRideById(input.rideId);
       if (ride?.passengerId) {
         await db.createNotification({
@@ -169,7 +181,7 @@ const ridesRouter = router({
           type: "driver_assigned",
           title: "Driver found!",
           body: "Your driver is on the way.",
-          data: JSON.stringify({ rideId: input.rideId, driverId: input.driverId }),
+          data: JSON.stringify({ rideId: input.rideId, driverId }),
         });
       }
       // Tell the passenger's tracking screen and dismiss other drivers' popups
@@ -185,28 +197,33 @@ const ridesRouter = router({
     }),
 
   // Driver declines a ride
-  decline: publicProcedure
-    .input(z.object({ rideId: z.number(), driverId: z.number() }))
-    .mutation(async ({ input }) => {
-      // Update driver acceptance rate
-      const driver = await db.getOrCreateDriverProfile(input.driverId);
+  decline: protectedProcedure
+    .input(z.object({ rideId: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const profile = await requireDriverProfile(requireAuthUser(ctx).id);
+      const driver = await db.getOrCreateDriverProfile(profile.userId);
       if (driver) {
         const current = parseFloat(driver.acceptanceRate ?? "100");
         const updated = Math.max(0, current - 2).toFixed(2);
-        await db.updateDriverProfile(input.driverId, { acceptanceRate: updated });
+        await db.updateDriverProfile(profile.userId, { acceptanceRate: updated });
       }
       return { success: true };
     }),
 
-  // Update ride status (arriving, in_progress)
-  updateStatus: publicProcedure
+  // Update ride status (driver only: arriving, in_progress, completed)
+  updateStatus: protectedProcedure
     .input(z.object({
       rideId: z.number(),
       status: z.enum(["arriving", "in_progress", "completed", "cancelled"]),
       cancelReason: z.string().optional(),
       cancelledBy: z.enum(["passenger", "driver", "system"]).optional(),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      const userId = requireAuthUser(ctx).id;
+      if (input.status === "cancelled") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Use rides.cancel to cancel a ride" });
+      }
+      await assertRideDriver(input.rideId, userId);
       if (input.status === "completed") {
         const ride = await db.getRideById(input.rideId);
         if (ride) {
@@ -284,23 +301,25 @@ const ridesRouter = router({
       return { success: true };
     }),
 
-  // Cancel a ride
-  cancel: publicProcedure
+  // Cancel a ride (passenger or driver on the ride)
+  cancel: protectedProcedure
     .input(z.object({
       rideId: z.number(),
-      cancelledBy: z.enum(["passenger", "driver", "system"]),
       reason: z.string().optional(),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      const userId = requireAuthUser(ctx).id;
+      const { role } = await assertRideParticipant(input.rideId, userId);
+      const cancelledBy = role;
       // Capture pre-cancel status so we can tell drivers a searching ride is gone
       const before = await db.getRideById(input.rideId);
       await db.updateRideStatus(input.rideId, "cancelled", {
-        cancelledBy: input.cancelledBy,
+        cancelledBy,
         cancelReason: input.reason,
       });
       const ride = await db.getRideById(input.rideId);
       // Notify the party who didn't cancel
-      if (ride?.passengerId && input.cancelledBy !== "passenger") {
+      if (ride?.passengerId && cancelledBy !== "passenger") {
         await db.createNotification({
           userId: ride.passengerId,
           type: "ride_cancelled",
@@ -309,7 +328,7 @@ const ridesRouter = router({
           data: JSON.stringify({ rideId: input.rideId }),
         });
       }
-      if (ride?.driverId && input.cancelledBy !== "driver") {
+      if (ride?.driverId && cancelledBy !== "driver") {
         // rides.driverId stores driverProfiles.id — resolve to the user id
         const driver = await db.getDriverPublicById(ride.driverId);
         if (driver?.userId) {
@@ -337,30 +356,45 @@ const ridesRouter = router({
       return { success: true };
     }),
 
-  // Submit rating
-  rate: publicProcedure
+  // Submit rating (identity from session; ratee derived from ride)
+  rate: protectedProcedure
     .input(z.object({
       rideId: z.number(),
-      raterId: z.number(),
-      rateeId: z.number(),
-      raterType: z.enum(["passenger", "driver"]),
       score: z.number().min(1).max(5),
       comment: z.string().optional(),
       tags: z.array(z.string()).optional(),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      const userId = requireAuthUser(ctx).id;
+      const { ride, role } = await assertRideParticipant(input.rideId, userId);
+      if (ride.status !== "completed") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "You can only rate a completed ride" });
+      }
+      let rateeId: number;
+      if (role === "passenger") {
+        if (!ride.driverId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "No driver assigned to this ride" });
+        }
+        const driver = await db.getDriverPublicById(ride.driverId);
+        if (!driver?.userId) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Driver not found" });
+        }
+        rateeId = driver.userId;
+      } else {
+        rateeId = ride.passengerId;
+      }
       await db.submitRating({
         rideId: input.rideId,
-        raterId: input.raterId,
-        rateeId: input.rateeId,
-        raterType: input.raterType,
+        raterId: userId,
+        rateeId,
+        raterType: role,
         score: input.score,
         comment: input.comment,
         tags: input.tags ? JSON.stringify(input.tags) : undefined,
       });
       // Let the ratee know
       await db.createNotification({
-        userId: input.rateeId,
+        userId: rateeId,
         type: "rating_received",
         title: `You got ${input.score} star${input.score !== 1 ? "s" : ""} ⭐`,
         body: input.comment ? `"${input.comment.slice(0, 120)}"` : "A rider rated their trip with you.",
@@ -370,49 +404,48 @@ const ridesRouter = router({
     }),
 
   // Get passenger ride history
-  passengerHistory: publicProcedure
-    .input(z.object({ passengerId: z.number(), limit: z.number().default(20), offset: z.number().default(0) }))
-    .query(async ({ input }) => {
-      return db.getPassengerRideHistory(input.passengerId, input.limit, input.offset);
+  passengerHistory: protectedProcedure
+    .input(z.object({ limit: z.number().default(20), offset: z.number().default(0) }))
+    .query(async ({ input, ctx }) => {
+      return db.getPassengerRideHistory(requireAuthUser(ctx).id, input.limit, input.offset);
     }),
 
   // Get driver ride history
-  driverHistory: publicProcedure
-    .input(z.object({ driverId: z.number(), limit: z.number().default(20), offset: z.number().default(0) }))
-    .query(async ({ input }) => {
-      return db.getDriverRideHistory(input.driverId, input.limit, input.offset);
+  driverHistory: protectedProcedure
+    .input(z.object({ limit: z.number().default(20), offset: z.number().default(0) }))
+    .query(async ({ input, ctx }) => {
+      const profile = await requireDriverProfile(requireAuthUser(ctx).id);
+      return db.getDriverRideHistory(profile.id, input.limit, input.offset);
     }),
 
   // Validate promo code
-  validatePromo: publicProcedure
-    .input(z.object({ code: z.string(), userId: z.number(), fare: z.number() }))
-    .mutation(async ({ input }) => {
-      return db.validatePromoCode(input.code, input.userId, input.fare);
+  validatePromo: protectedProcedure
+    .input(z.object({ code: z.string(), fare: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      return db.validatePromoCode(input.code, requireAuthUser(ctx).id, input.fare);
     }),
 });
 
 // ─── Driver Router ────────────────────────────────────────────────────────────
 
 const driverRouter = router({
-  // Get driver profile
-  getProfile: publicProcedure
-    .input(z.object({ userId: z.number() }))
-    .query(async ({ input }) => {
-      return db.getOrCreateDriverProfile(input.userId);
-    }),
+  // Get driver profile for the logged-in user
+  getProfile: protectedProcedure.query(async ({ ctx }) => {
+    return db.getOrCreateDriverProfile(requireAuthUser(ctx).id);
+  }),
 
   // Public driver card (name, vehicle, rating) for the passenger tracking
   // screen. Looked up by driverProfiles.id — what rides.driverId stores.
-  getPublic: publicProcedure
+  getPublic: protectedProcedure
     .input(z.object({ driverId: z.number() }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
+      await assertCanViewDriverPublic(input.driverId, requireAuthUser(ctx).id);
       return db.getDriverPublicById(input.driverId);
     }),
 
   // Update driver profile
-  updateProfile: publicProcedure
+  updateProfile: protectedProcedure
     .input(z.object({
-      userId: z.number(),
       vehicleModel: z.string().optional(),
       vehiclePlate: z.string().optional(),
       vehicleColor: z.string().optional(),
@@ -421,94 +454,90 @@ const driverRouter = router({
       licenseNumber: z.string().optional(),
       avatarUrl: z.string().optional(),
     }))
-    .mutation(async ({ input }) => {
-      const { userId, ...data } = input;
-      await db.updateDriverProfile(userId, data);
+    .mutation(async ({ input, ctx }) => {
+      await db.updateDriverProfile(requireAuthUser(ctx).id, input);
       return { success: true };
     }),
 
   // Link the driver's Aza account (payout destination for Connect transfers)
-  setAzaRecipient: publicProcedure
+  setAzaRecipient: protectedProcedure
     .input(z.object({
-      driverId: z.number(), // driverProfiles.id
       azaRecipient: z.string().trim().max(320),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      const profile = await requireDriverProfile(requireAuthUser(ctx).id);
       if (input.azaRecipient) {
-        // Best-effort validation when live; network failures don't block saving
         const check = await aza.resolveRecipient(input.azaRecipient);
         if (!check.valid) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "That Aza account was not found. Check the email or username." });
         }
       }
-      await db.updateDriverProfileById(input.driverId, {
+      await db.updateDriverProfileById(profile.id, {
         azaRecipient: input.azaRecipient || null,
       });
       return { success: true };
     }),
 
-  // Toggle online/offline
-  toggleOnline: publicProcedure
-    .input(z.object({ driverId: z.number(), isOnline: z.boolean() }))
-    .mutation(async ({ input }) => {
-      await db.toggleDriverOnline(input.driverId, input.isOnline);
+  toggleOnline: protectedProcedure
+    .input(z.object({ isOnline: z.boolean() }))
+    .mutation(async ({ input, ctx }) => {
+      const profile = await requireDriverProfile(requireAuthUser(ctx).id);
+      if (input.isOnline) {
+        assertDriverCanGoOnline(profile.isVerified);
+      }
+      await db.toggleDriverOnline(profile.id, input.isOnline);
       return { success: true, isOnline: input.isOnline };
     }),
 
-  // Update driver location
-  updateLocation: publicProcedure
-    .input(z.object({ driverId: z.number(), lat: z.number(), lng: z.number() }))
-    .mutation(async ({ input }) => {
-      await db.updateDriverLocation(input.driverId, input.lat, input.lng);
-      // Stream the fix to whoever is watching this driver (passenger tracking)
+  updateLocation: protectedProcedure
+    .input(z.object({ lat: z.number(), lng: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const profile = await requireDriverProfile(requireAuthUser(ctx).id);
+      await db.updateDriverLocation(profile.id, input.lat, input.lng);
       realtimeBus.publish(
-        { kind: "topic", topic: `driver:${input.driverId}` },
-        { type: "driver:location", driverId: input.driverId, lat: input.lat, lng: input.lng },
+        { kind: "topic", topic: `driver:${profile.id}` },
+        { type: "driver:location", driverId: profile.id, lat: input.lat, lng: input.lng },
       );
       return { success: true };
     }),
 
-  // Get earnings summary
-  earningsSummary: publicProcedure
-    .input(z.object({ driverId: z.number(), period: z.enum(["today", "week", "month"]).default("week") }))
-    .query(async ({ input }) => {
-      return db.getDriverEarningsSummary(input.driverId, input.period);
+  earningsSummary: protectedProcedure
+    .input(z.object({ period: z.enum(["today", "week", "month"]).default("week") }))
+    .query(async ({ input, ctx }) => {
+      const profile = await requireDriverProfile(requireAuthUser(ctx).id);
+      return db.getDriverEarningsSummary(profile.id, input.period);
     }),
 
-  // Get payout history
-  payoutHistory: publicProcedure
-    .input(z.object({ driverId: z.number(), limit: z.number().default(10) }))
-    .query(async ({ input }) => {
-      return db.getDriverPayoutHistory(input.driverId, input.limit);
+  payoutHistory: protectedProcedure
+    .input(z.object({ limit: z.number().default(10) }))
+    .query(async ({ input, ctx }) => {
+      const profile = await requireDriverProfile(requireAuthUser(ctx).id);
+      return db.getDriverPayoutHistory(profile.id, input.limit);
     }),
 
-  // Request payout
-  requestPayout: publicProcedure
+  requestPayout: protectedProcedure
     .input(z.object({
-      driverId: z.number(),
       amount: z.number().positive(),
       method: z.enum(["bank_transfer", "instant", "mobile_money"]),
       accountLast4: z.string().optional(),
     }))
-    .mutation(async ({ input }) => {
-      return db.requestPayout(input.driverId, input.amount, input.method, input.accountLast4);
+    .mutation(async ({ input, ctx }) => {
+      const profile = await requireDriverProfile(requireAuthUser(ctx).id);
+      return db.requestPayout(profile.id, input.amount, input.method, input.accountLast4);
     }),
 
-  // Get driver wallet
-  getWallet: publicProcedure
-    .input(z.object({ driverId: z.number() }))
-    .query(async ({ input }) => {
-      const db2 = await db.getDb();
-      if (!db2) return { balance: "0.00", transactions: [] };
-      const { driverProfiles, walletTransactions } = await import("../drizzle/schema");
-      const { eq, and, desc } = await import("drizzle-orm");
-      const profile = await db2.select({ walletBalance: driverProfiles.walletBalance }).from(driverProfiles).where(eq(driverProfiles.id, input.driverId)).limit(1);
-      const txns = await db2.select().from(walletTransactions).where(and(eq(walletTransactions.userId, input.driverId), eq(walletTransactions.userType, "driver"))).orderBy(desc(walletTransactions.createdAt)).limit(20);
-      return { balance: profile[0]?.walletBalance ?? "0.00", transactions: txns };
-    }),
+  getWallet: protectedProcedure.query(async ({ ctx }) => {
+    const profile = await requireDriverProfile(requireAuthUser(ctx).id);
+    const db2 = await db.getDb();
+    if (!db2) return { balance: "0.00", transactions: [] };
+    const { driverProfiles, walletTransactions } = await import("../drizzle/schema");
+    const { eq, and, desc } = await import("drizzle-orm");
+    const row = await db2.select({ walletBalance: driverProfiles.walletBalance }).from(driverProfiles).where(eq(driverProfiles.id, profile.id)).limit(1);
+    const txns = await db2.select().from(walletTransactions).where(and(eq(walletTransactions.userId, profile.id), eq(walletTransactions.userType, "driver"))).orderBy(desc(walletTransactions.createdAt)).limit(20);
+    return { balance: row[0]?.walletBalance ?? "0.00", transactions: txns };
+  }),
 
-  // Find nearest driver for a ride
-  findNearest: publicProcedure
+  findNearest: protectedProcedure
     .input(z.object({
       rideType: z.enum(["economy", "comfort", "premium"]),
       pickupLat: z.number(),
@@ -519,7 +548,7 @@ const driverRouter = router({
     }),
 
   // Online drivers near a point — count + positions for the passenger map
-  nearby: publicProcedure
+  nearby: protectedProcedure
     .input(z.object({
       lat: z.number(),
       lng: z.number(),
@@ -533,17 +562,12 @@ const driverRouter = router({
 // ─── Passenger Router ─────────────────────────────────────────────────────────
 
 const passengerRouter = router({
-  // Get passenger profile
-  getProfile: publicProcedure
-    .input(z.object({ userId: z.number() }))
-    .query(async ({ input }) => {
-      return db.getOrCreatePassengerProfile(input.userId);
-    }),
+  getProfile: protectedProcedure.query(async ({ ctx }) => {
+    return db.getOrCreatePassengerProfile(requireAuthUser(ctx).id);
+  }),
 
-  // Update passenger profile
-  updateProfile: publicProcedure
+  updateProfile: protectedProcedure
     .input(z.object({
-      userId: z.number(),
       homeAddress: z.string().optional(),
       homeLat: z.number().optional(),
       homeLng: z.number().optional(),
@@ -552,84 +576,67 @@ const passengerRouter = router({
       workLng: z.number().optional(),
       avatarUrl: z.string().optional(),
     }))
-    .mutation(async ({ input }) => {
-      const { userId, ...data } = input;
-      await db.updatePassengerProfile(userId, data);
+    .mutation(async ({ input, ctx }) => {
+      await db.updatePassengerProfile(requireAuthUser(ctx).id, input);
       return { success: true };
     }),
 
-  // Get wallet
-  getWallet: publicProcedure
-    .input(z.object({ userId: z.number() }))
-    .query(async ({ input }) => {
-      return db.getPassengerWallet(input.userId);
-    }),
+  getWallet: protectedProcedure.query(async ({ ctx }) => {
+    return db.getPassengerWallet(requireAuthUser(ctx).id);
+  }),
 
-  // Get saved places
-  getSavedPlaces: publicProcedure
-    .input(z.object({ userId: z.number() }))
-    .query(async ({ input }) => {
-      return db.getSavedPlaces(input.userId);
-    }),
+  getSavedPlaces: protectedProcedure.query(async ({ ctx }) => {
+    return db.getSavedPlaces(requireAuthUser(ctx).id);
+  }),
 
-  // Add saved place
-  addSavedPlace: publicProcedure
+  addSavedPlace: protectedProcedure
     .input(z.object({
-      userId: z.number(),
       label: z.string(),
       address: z.string(),
       lat: z.number(),
       lng: z.number(),
       icon: z.string().optional(),
     }))
-    .mutation(async ({ input }) => {
-      await db.addSavedPlace(input);
+    .mutation(async ({ input, ctx }) => {
+      await db.addSavedPlace({ ...input, userId: requireAuthUser(ctx).id });
       return { success: true };
     }),
 
-  // Delete saved place
-  deleteSavedPlace: publicProcedure
-    .input(z.object({ id: z.number(), userId: z.number() }))
-    .mutation(async ({ input }) => {
-      await db.deleteSavedPlace(input.id, input.userId);
+  deleteSavedPlace: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      await db.deleteSavedPlace(input.id, requireAuthUser(ctx).id);
       return { success: true };
     }),
 
-  // Get payment methods
-  getPaymentMethods: publicProcedure
-    .input(z.object({ userId: z.number() }))
-    .query(async ({ input }) => {
-      return db.getPaymentMethods(input.userId);
-    }),
+  getPaymentMethods: protectedProcedure.query(async ({ ctx }) => {
+    return db.getPaymentMethods(requireAuthUser(ctx).id);
+  }),
 
-  // Add payment method
-  addPaymentMethod: publicProcedure
+  addPaymentMethod: protectedProcedure
     .input(z.object({
-      userId: z.number(),
       type: z.enum(["card", "mobile_money", "wallet"]),
       label: z.string(),
       last4: z.string().optional(),
       network: z.string().optional(),
       isDefault: z.boolean().default(false),
     }))
-    .mutation(async ({ input }) => {
-      await db.addPaymentMethod(input);
+    .mutation(async ({ input, ctx }) => {
+      await db.addPaymentMethod({ ...input, userId: requireAuthUser(ctx).id });
       return { success: true };
     }),
 
-  // Delete payment method
-  deletePaymentMethod: publicProcedure
-    .input(z.object({ id: z.number(), userId: z.number() }))
-    .mutation(async ({ input }) => {
-      await db.deletePaymentMethod(input.id, input.userId);
+  deletePaymentMethod: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      await db.deletePaymentMethod(input.id, requireAuthUser(ctx).id);
       return { success: true };
     }),
 
-  // Make one payment method the default
-  setDefaultPaymentMethod: publicProcedure
-    .input(z.object({ id: z.number(), userId: z.number() }))
-    .mutation(async ({ input }) => {
-      await db.setDefaultPaymentMethod(input.id, input.userId);
+  setDefaultPaymentMethod: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      await db.setDefaultPaymentMethod(input.id, requireAuthUser(ctx).id);
       return { success: true };
     }),
 });
@@ -637,37 +644,34 @@ const passengerRouter = router({
 // ─── Notifications Router ─────────────────────────────────────────────────────
 
 const notificationsRouter = router({
-  getAll: publicProcedure
-    .input(z.object({ userId: z.number(), limit: z.number().default(20) }))
-    .query(async ({ input }) => {
-      return db.getUserNotifications(input.userId, input.limit);
+  getAll: protectedProcedure
+    .input(z.object({ limit: z.number().default(20) }))
+    .query(async ({ input, ctx }) => {
+      return db.getUserNotifications(requireAuthUser(ctx).id, input.limit);
     }),
 
-  getUnreadCount: publicProcedure
-    .input(z.object({ userId: z.number() }))
-    .query(async ({ input }) => {
-      const count = await db.getUnreadNotificationCount(input.userId);
-      return { count };
-    }),
+  getUnreadCount: protectedProcedure.query(async ({ ctx }) => {
+    const count = await db.getUnreadNotificationCount(requireAuthUser(ctx).id);
+    return { count };
+  }),
 
-  markRead: publicProcedure
+  markRead: protectedProcedure
     .input(z.object({ notificationId: z.number() }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      await assertNotificationOwner(input.notificationId, requireAuthUser(ctx).id);
       await db.markNotificationRead(input.notificationId);
       return { success: true };
     }),
 
-  markAllRead: publicProcedure
-    .input(z.object({ userId: z.number() }))
-    .mutation(async ({ input }) => {
-      await db.markAllNotificationsRead(input.userId);
-      return { success: true };
-    }),
+  markAllRead: protectedProcedure.mutation(async ({ ctx }) => {
+    await db.markAllNotificationsRead(requireAuthUser(ctx).id);
+    return { success: true };
+  }),
 
-  registerPushToken: publicProcedure
-    .input(z.object({ userId: z.number(), token: z.string() }))
-    .mutation(async ({ input }) => {
-      await db.savePushToken(input.userId, input.token);
+  registerPushToken: protectedProcedure
+    .input(z.object({ token: z.string() }))
+    .mutation(async ({ input, ctx }) => {
+      await db.savePushToken(requireAuthUser(ctx).id, input.token);
       return { success: true };
     }),
 });
@@ -675,25 +679,25 @@ const notificationsRouter = router({
 // ─── Support Router ───────────────────────────────────────────────────────────
 
 const supportRouter = router({
-  createTicket: publicProcedure
+  createTicket: protectedProcedure
     .input(z.object({
-      userId: z.number(),
       rideId: z.number().optional(),
       category: z.string(),
       subject: z.string(),
       description: z.string(),
       priority: z.enum(["low", "medium", "high", "urgent"]).default("medium"),
     }))
-    .mutation(async ({ input }) => {
-      const ticketId = await db.createSupportTicket(input);
+    .mutation(async ({ input, ctx }) => {
+      const ticketId = await db.createSupportTicket({
+        ...input,
+        userId: requireAuthUser(ctx).id,
+      });
       return { success: true, ticketId };
     }),
 
-  getMyTickets: publicProcedure
-    .input(z.object({ userId: z.number() }))
-    .query(async ({ input }) => {
-      return db.getUserSupportTickets(input.userId);
-    }),
+  getMyTickets: protectedProcedure.query(async ({ ctx }) => {
+    return db.getUserSupportTickets(requireAuthUser(ctx).id);
+  }),
 });
 
 // ─── SOS Router ───────────────────────────────────────────────────────────────
@@ -710,8 +714,18 @@ const sosRouter = router({
       message: z.string().max(500).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
+      const userId = requireAuthUser(ctx).id;
+      if (input.rideId) {
+        const { role } = await assertRideParticipant(input.rideId, userId);
+        if (input.triggeredBy !== role) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `You can only trigger SOS as the ${role} on this ride`,
+          });
+        }
+      }
       const alertId = await db.createSosAlert({
-        userId: ctx.user.id,
+        userId,
         triggeredBy: input.triggeredBy,
         rideId: input.rideId,
         latitude: input.latitude,
@@ -767,9 +781,10 @@ const sosRouter = router({
   }),
 
   // Active alerts on a ride (so the other party's app can show a banner)
-  getActiveForRide: publicProcedure
+  getActiveForRide: protectedProcedure
     .input(z.object({ rideId: z.number() }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
+      await assertRideParticipant(input.rideId, requireAuthUser(ctx).id);
       return db.getActiveSosForRide(input.rideId);
     }),
 
@@ -800,23 +815,6 @@ const sosRouter = router({
 });
 
 // ─── Messages Router (driver ↔ passenger chat) ───────────────────────────────
-
-/**
- * Resolve the caller's role on a ride, or null if they're not a party to it.
- * rides.driverId stores driverProfiles.id — map via the profile to compare
- * against the authenticated users.id.
- */
-async function getRideRole(
-  ride: { passengerId: number; driverId: number | null },
-  userId: number,
-): Promise<"passenger" | "driver" | null> {
-  if (ride.passengerId === userId) return "passenger";
-  if (ride.driverId != null) {
-    const driver = await db.getDriverPublicById(ride.driverId);
-    if (driver?.userId === userId) return "driver";
-  }
-  return null;
-}
 
 const messagesRouter = router({
   // Send a chat message on a live ride. Identity comes from the session, not

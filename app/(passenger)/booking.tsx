@@ -99,10 +99,9 @@ export default function BookingScreen() {
   const [promoCode] = useState("RIDEX10");
   const [isBooking, setIsBooking] = useState(false);
 
-  const walletQuery = trpc.passenger.getWallet.useQuery(
-    { userId: Number(user?.id) },
-    { enabled: Number.isFinite(Number(user?.id)) }
-  );
+  const walletQuery = trpc.passenger.getWallet.useQuery(undefined, {
+    enabled: Number.isFinite(Number(user?.id)),
+  });
   const walletBalance = parseFloat(walletQuery.data?.balance ?? "0");
 
   const selectedOption = RIDE_OPTIONS.find((r) => r.type === selectedType)!;
@@ -238,16 +237,7 @@ export default function BookingScreen() {
   const handleBook = async () => {
     setIsBooking(true);
     try {
-      const passengerId = Number(user?.id);
-      if (!Number.isFinite(passengerId)) {
-        throw new Error("Not logged in");
-      }
-      if (!params.destination) {
-        throw new Error("Please choose a destination first");
-      }
-
       const result = await requestRide.mutateAsync({
-        passengerId,
         rideType: selectedType,
         pickupAddress: effectivePickupAddress,
         pickupLat,

@@ -11,15 +11,48 @@ import { startRideSweeper } from "../rideSweeper";
 import { startPaymentSweeper } from "../paymentSweeper";
 import { registerAzaRoutes } from "../azaWebhook";
 import { registerMapboxRoutes } from "./mapbox";
+import { ENV } from "./env";
+import * as db from "../db";
+
+function isOriginAllowed(origin: string | undefined): boolean {
+  if (!origin) return false;
+  if (!ENV.isProduction) return true;
+  const allowed = (process.env.CORS_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (allowed.length === 0) return true;
+  return allowed.includes(origin);
+}
+
+function warnProductionConfig() {
+  if (!ENV.isProduction) return;
+  if (!(process.env.CORS_ORIGINS ?? "").trim()) {
+    console.warn(
+      "[config] CORS_ORIGINS is empty in production — all browser origins are allowed. Set a comma-separated allowlist.",
+    );
+  }
+  if (process.env.AUTO_VERIFY_DRIVERS !== "false" && process.env.AUTO_VERIFY_DRIVERS !== "true") {
+    console.warn(
+      "[config] Set AUTO_VERIFY_DRIVERS=false in production to require manual driver verification.",
+    );
+  }
+  if (!process.env.SMS_PROVIDER) {
+    console.warn("[config] SMS_PROVIDER is not set — OTP codes will not be sent via SMS.");
+  }
+  if (!process.env.AZA_API_KEY) {
+    console.warn("[config] AZA_API_KEY is not set — payments run in dev simulation mode.");
+  }
+}
 
 async function startServer() {
   const app = express();
   const server = createServer(app);
 
-  // Enable CORS for all routes - reflect the request origin to support credentials
+  // CORS: permissive in dev; allowlist in production via CORS_ORIGINS
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (origin) {
+    if (origin && isOriginAllowed(origin)) {
       res.header("Access-Control-Allow-Origin", origin);
     }
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -47,8 +80,20 @@ async function startServer() {
   registerOAuthRoutes(app);
   registerMapboxRoutes(app);
 
-  app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, timestamp: Date.now() });
+  app.get("/api/health", async (_req, res) => {
+    let dbOk = false;
+    try {
+      dbOk = (await db.getDb()) != null;
+    } catch {
+      dbOk = false;
+    }
+    const ok = dbOk;
+    res.status(ok ? 200 : 503).json({
+      ok,
+      db: dbOk,
+      timestamp: Date.now(),
+      env: ENV.isProduction ? "production" : "development",
+    });
   });
 
   app.use(
@@ -73,6 +118,7 @@ async function startServer() {
   startPaymentSweeper();
 
   server.listen(port, "0.0.0.0", () => {
+    warnProductionConfig();
     console.log(`[api] server listening on port ${port}`);
   });
 }

@@ -143,19 +143,14 @@ export default function RatingScreen() {
     setIsSubmitting(true);
     try {
       // Prefer the param; fall back to resolving via the ride's driver profile
-      const rateeId = Number(params.driverUserId) || driver?.userId;
-      const raterId = Number(user?.id);
-      if (Number.isFinite(rideId) && rateeId && Number.isFinite(raterId)) {
+      if (Number.isFinite(rideId)) {
         await rateRide.mutateAsync({
           rideId,
-          raterId,
-          rateeId,
-          raterType: "passenger",
           score: rating,
           comment: [selectedTags.join(", "), comment].filter(Boolean).join(". "),
         });
       } else {
-        console.warn("[Rating] Missing ride/driver context, skipping server submit");
+        console.warn("[Rating] Missing ride context, skipping server submit");
       }
     } catch (err) {
       console.warn("[Rating] Failed to submit rating:", err);

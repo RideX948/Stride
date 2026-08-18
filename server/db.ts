@@ -235,6 +235,36 @@ export async function updateDriverProfile(userId: number, data: Partial<typeof d
   await db.update(driverProfiles).set(data).where(eq(driverProfiles.userId, userId));
 }
 
+/** Mark a driver's profile verified (or revoke verification). Keys off users.id. */
+export async function setDriverVerified(userId: number, isVerified: boolean) {
+  const profile = await getOrCreateDriverProfile(userId);
+  if (!profile) throw new Error("Driver profile unavailable");
+  await updateDriverProfile(userId, { isVerified });
+  return { ...profile, isVerified };
+}
+
+/** Admin: list drivers pending manual verification. */
+export async function listUnverifiedDrivers(limit = 50) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select({
+      driverProfileId: driverProfiles.id,
+      userId: driverProfiles.userId,
+      name: users.name,
+      phone: users.phone,
+      vehicleModel: driverProfiles.vehicleModel,
+      vehiclePlate: driverProfiles.vehiclePlate,
+      licenseNumber: driverProfiles.licenseNumber,
+      createdAt: driverProfiles.createdAt,
+    })
+    .from(driverProfiles)
+    .innerJoin(users, eq(users.id, driverProfiles.userId))
+    .where(eq(driverProfiles.isVerified, false))
+    .orderBy(desc(driverProfiles.createdAt))
+    .limit(limit);
+}
+
 /**
  * Public driver card for passengers: profile (by driverProfiles.id, which is
  * what rides.driverId stores) joined with the user's display name.
@@ -603,6 +633,18 @@ export async function getDriverRideHistory(driverId: number, limit = 20, offset 
   return db.select().from(rides)
     .where(and(eq(rides.driverId, driverId), or(eq(rides.status, "completed"), eq(rides.status, "cancelled"))))
     .orderBy(desc(rides.createdAt)).limit(limit).offset(offset);
+}
+
+/** True if this passenger has ever been assigned this driver (active or completed rides). */
+export async function passengerHasRideWithDriver(passengerId: number, driverProfileId: number) {
+  const dbConn = await getDb();
+  if (!dbConn) return false;
+  const rows = await dbConn
+    .select({ id: rides.id })
+    .from(rides)
+    .where(and(eq(rides.passengerId, passengerId), eq(rides.driverId, driverProfileId)))
+    .limit(1);
+  return rows.length > 0;
 }
 
 export async function getActiveRideForPassenger(passengerId: number) {

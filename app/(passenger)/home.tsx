@@ -233,10 +233,10 @@ export default function PassengerHomeScreen() {
   // surface a banner that jumps back to the tracking screen — navigating away
   // (e.g. via chat back button or tab switch) must never strand the ride.
   const passengerId = Number(user?.id);
-  const activeRideQuery = trpc.rides.getActiveForPassenger.useQuery(
-    { passengerId },
-    { enabled: Number.isFinite(passengerId), refetchInterval: 10000 }
-  );
+  const activeRideQuery = trpc.rides.getActiveForPassenger.useQuery(undefined, {
+    enabled: Number.isFinite(passengerId),
+    refetchInterval: 10000,
+  });
   const activeRide = activeRideQuery.data;
 
   // Real online drivers near the passenger (count + map markers)

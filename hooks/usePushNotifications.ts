@@ -45,7 +45,6 @@ export function usePushNotifications() {
 
       // Register token with backend
       registerToken.mutate({
-        userId: user.id,
         token: token.data,
       });
 

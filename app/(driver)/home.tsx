@@ -55,10 +55,9 @@ export default function DriverHomeScreen() {
 
   // Driver profile (creates one on first call). profile.id is the driverId
   // that rides.driverId references.
-  const profileQuery = trpc.driver.getProfile.useQuery(
-    { userId },
-    { enabled: Number.isFinite(userId) }
-  );
+  const profileQuery = trpc.driver.getProfile.useQuery(undefined, {
+    enabled: Number.isFinite(userId),
+  });
   const driverId = profileQuery.data?.id;
 
   // Reflect the server's online state once on load
@@ -75,10 +74,10 @@ export default function DriverHomeScreen() {
   const updateStatus = trpc.rides.updateStatus.useMutation();
 
   // Current active ride for this driver (accepted/arriving/in_progress)
-  const activeRideQuery = trpc.rides.getActiveForDriver.useQuery(
-    { driverId: driverId ?? 0 },
-    { enabled: !!driverId, refetchInterval: live ? 20000 : 4000 }
-  );
+  const activeRideQuery = trpc.rides.getActiveForDriver.useQuery(undefined, {
+    enabled: !!driverId,
+    refetchInterval: live ? 20000 : 4000,
+  });
   const activeRide = activeRideQuery.data;
 
   // Realtime: new/taken requests while waiting, lifecycle updates mid-ride
@@ -169,7 +168,7 @@ export default function DriverHomeScreen() {
 
   // Today's earnings
   const earningsQuery = trpc.driver.earningsSummary.useQuery(
-    { driverId: driverId ?? 0, period: "today" },
+    { period: "today" },
     { enabled: !!driverId, refetchInterval: 30000 }
   );
 
@@ -178,7 +177,7 @@ export default function DriverHomeScreen() {
     const newState = !isOnline;
     setIsOnline(newState);
     try {
-      await toggleOnline.mutateAsync({ driverId, isOnline: newState });
+      await toggleOnline.mutateAsync({ isOnline: newState });
     } catch (err) {
       // Revert on failure so UI matches the server
       console.warn("[DriverHome] toggleOnline failed:", err);
@@ -210,7 +209,7 @@ export default function DriverHomeScreen() {
   const handleAccept = async () => {
     if (!incomingRide || !driverId) return;
     try {
-      await acceptRide.mutateAsync({ rideId: incomingRide.id, driverId });
+      await acceptRide.mutateAsync({ rideId: incomingRide.id });
       await activeRideQuery.refetch();
     } catch (err) {
       console.warn("[DriverHome] accept failed:", err);
@@ -226,7 +225,7 @@ export default function DriverHomeScreen() {
     // Server's decline keys acceptance-rate updates off the USER id
     // (getOrCreateDriverProfile/updateDriverProfile are userId-keyed).
     if (Number.isFinite(userId)) {
-      declineRide.mutate({ rideId: incomingRide.id, driverId: userId });
+      declineRide.mutate({ rideId: incomingRide.id });
     }
   };
 

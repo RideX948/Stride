@@ -68,12 +68,12 @@ export function NotificationsBell({
   // slow fallback while the push channel is down
   const live = useRealtimeConnected();
 
-  const unreadQuery = trpc.notifications.getUnreadCount.useQuery(
-    { userId },
-    { enabled: Number.isFinite(userId), refetchInterval: live ? 60000 : 15000 }
-  );
+  const unreadQuery = trpc.notifications.getUnreadCount.useQuery(undefined, {
+    enabled: Number.isFinite(userId),
+    refetchInterval: live ? 60000 : 15000,
+  });
   const listQuery = trpc.notifications.getAll.useQuery(
-    { userId, limit: 30 },
+    { limit: 30 },
     { enabled: Number.isFinite(userId) && open }
   );
   const markRead = trpc.notifications.markRead.useMutation();
@@ -104,7 +104,7 @@ export function NotificationsBell({
 
   const handleMarkAll = async () => {
     try {
-      await markAllRead.mutateAsync({ userId });
+      await markAllRead.mutateAsync();
       refresh();
     } catch (err) {
       console.warn("[Notifications] markAllRead failed:", err);

@@ -78,10 +78,10 @@ export default function TrackingScreen() {
     });
   }, []);
 
-  const activeRideQuery = trpc.rides.getActiveForPassenger.useQuery(
-    { passengerId },
-    { enabled: Number.isFinite(passengerId) && rideId === null, refetchInterval: live ? 20000 : 4000 }
-  );
+  const activeRideQuery = trpc.rides.getActiveForPassenger.useQuery(undefined, {
+    enabled: Number.isFinite(passengerId) && rideId === null,
+    refetchInterval: live ? 20000 : 4000,
+  });
   useEffect(() => {
     if (rideId === null && activeRideQuery.data?.id) {
       setRideId(activeRideQuery.data.id);
@@ -297,7 +297,6 @@ export default function TrackingScreen() {
           try {
             await cancelRide.mutateAsync({
               rideId,
-              cancelledBy: "passenger",
               reason: "Cancelled by passenger",
             });
           } catch (err) {

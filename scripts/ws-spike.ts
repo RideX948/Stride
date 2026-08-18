@@ -64,7 +64,7 @@ async function main() {
   const res = await fetch(`http://localhost:${port}/api/trpc/driver.updateLocation`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ json: { driverId: 1, lat: 5.6037, lng: -0.187 } }),
+    body: JSON.stringify({ json: { lat: 5.6037, lng: -0.187 } }),
   });
   console.log("updateLocation http status:", res.status);
   await new Promise((r) => setTimeout(r, 800));

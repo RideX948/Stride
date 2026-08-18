@@ -130,7 +130,7 @@ export default function ActivityScreen() {
   const [filter, setFilter] = useState<"all" | "completed" | "cancelled">("all");
 
   const historyQuery = trpc.rides.passengerHistory.useQuery(
-    { passengerId, limit: 50 },
+    { limit: 50 },
     { enabled: Number.isFinite(passengerId) }
   );
 

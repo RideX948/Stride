@@ -38,7 +38,7 @@ export function useDriverLocation(driverId: number | undefined, enabled: boolean
       if (now - lastSentRef.current < UPDATE_INTERVAL_MS) return;
       lastSentRef.current = now;
       mutateRef.current(
-        { driverId, lat, lng },
+        { lat, lng },
         { onError: (e) => console.warn("[Location] update failed:", e.message) }
       );
     };

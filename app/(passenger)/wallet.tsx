@@ -65,14 +65,12 @@ export default function WalletScreen() {
   const [pendingPaymentId, setPendingPaymentId] = useState<number | null>(null);
   const [isDevTopUp, setIsDevTopUp] = useState(false);
 
-  const walletQuery = trpc.passenger.getWallet.useQuery(
-    { userId },
-    { enabled: Number.isFinite(userId) }
-  );
-  const paymentMethodsQuery = trpc.passenger.getPaymentMethods.useQuery(
-    { userId },
-    { enabled: Number.isFinite(userId) }
-  );
+  const walletQuery = trpc.passenger.getWallet.useQuery(undefined, {
+    enabled: Number.isFinite(userId),
+  });
+  const paymentMethodsQuery = trpc.passenger.getPaymentMethods.useQuery(undefined, {
+    enabled: Number.isFinite(userId),
+  });
   const createTopUp = trpc.payments.createTopUp.useMutation();
 
   // While waiting, poll the payment status (wallet:update realtime also
@@ -191,10 +189,9 @@ export default function WalletScreen() {
     }
     try {
       await addMethod.mutateAsync({
-        userId,
         type: pmType,
         label: pmLabel.trim(),
-        last4: digits.slice(-4), // never store the full number
+        last4: digits.slice(-4),
         network: pmNetwork || undefined,
         isDefault: pmDefault,
       });
@@ -213,7 +210,7 @@ export default function WalletScreen() {
         text: "Set as default",
         onPress: async () => {
           try {
-            await setDefaultMethod.mutateAsync({ id: pm.id, userId });
+            await setDefaultMethod.mutateAsync({ id: pm.id });
             paymentMethodsQuery.refetch();
           } catch {
             Alert.alert("Failed", "Could not update. Try again.");
@@ -232,7 +229,7 @@ export default function WalletScreen() {
             style: "destructive",
             onPress: async () => {
               try {
-                await deleteMethod.mutateAsync({ id: pm.id, userId });
+                await deleteMethod.mutateAsync({ id: pm.id });
                 paymentMethodsQuery.refetch();
               } catch {
                 Alert.alert("Failed", "Could not remove. Try again.");

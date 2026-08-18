@@ -123,14 +123,13 @@ export default function DriverTripsScreen() {
   const userId = Number(user?.id);
 
   // Ride rows key off driverProfiles.id, so resolve the profile first
-  const profileQuery = trpc.driver.getProfile.useQuery(
-    { userId },
-    { enabled: Number.isFinite(userId) }
-  );
+  const profileQuery = trpc.driver.getProfile.useQuery(undefined, {
+    enabled: Number.isFinite(userId),
+  });
   const driverId = profileQuery.data?.id;
 
   const historyQuery = trpc.rides.driverHistory.useQuery(
-    { driverId: driverId ?? 0, limit: 50 },
+    { limit: 50 },
     { enabled: !!driverId }
   );
 
